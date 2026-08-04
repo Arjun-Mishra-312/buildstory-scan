@@ -1,0 +1,401 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://story-scanner.local/schemas/project-snapshot-1.0.0.json",
+  "title": "ProjectSnapshot",
+  "description": "Privacy-preserving aggregate of repository and AI coding-session activity. Transcript bodies, tool payloads, paths, diffs, and source text are intentionally not representable.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "scanId",
+    "generatedAt",
+    "sourceSelection",
+    "repository",
+    "timeWindow",
+    "sessions",
+    "usage",
+    "git",
+    "milestones",
+    "evidence",
+    "redaction",
+    "provenance",
+    "quality"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "1.0.0" },
+    "scanId": { "type": "string", "pattern": "^scan_[a-f0-9]{24}$" },
+    "generatedAt": { "$ref": "#/$defs/dateTime" },
+    "sourceSelection": { "$ref": "#/$defs/sourceSelection" },
+    "repository": { "$ref": "#/$defs/repository" },
+    "timeWindow": { "$ref": "#/$defs/timeWindow" },
+    "sessions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/session" }
+    },
+    "usage": { "$ref": "#/$defs/usage" },
+    "git": { "$ref": "#/$defs/git" },
+    "milestones": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/milestone" }
+    },
+    "evidence": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/evidence" }
+    },
+    "redaction": { "$ref": "#/$defs/redaction" },
+    "provenance": { "$ref": "#/$defs/provenance" },
+    "quality": { "$ref": "#/$defs/quality" }
+  },
+  "$defs": {
+    "dateTime": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "nonNegativeInteger": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "sourceSelection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["providers", "consent"],
+      "properties": {
+        "providers": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["provider", "selected", "repositoryScoped", "rootsConsidered", "filesDiscovered", "sessionsMatched", "sessionsIncluded"],
+            "properties": {
+              "provider": { "const": "codex" },
+              "selected": { "const": true },
+              "repositoryScoped": { "const": true },
+              "rootsConsidered": { "$ref": "#/$defs/nonNegativeInteger" },
+              "filesDiscovered": { "$ref": "#/$defs/nonNegativeInteger" },
+              "sessionsMatched": { "$ref": "#/$defs/nonNegativeInteger" },
+              "sessionsIncluded": { "$ref": "#/$defs/nonNegativeInteger" }
+            }
+          }
+        },
+        "consent": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "statementVersion", "approvedActions", "deniedActions"],
+          "properties": {
+            "mode": { "const": "explicit-cli" },
+            "statementVersion": { "const": "1.0" },
+            "approvedActions": {
+              "type": "array",
+              "prefixItems": [
+                { "const": "read-repository-metadata" },
+                { "const": "read-selected-local-session-metadata" },
+                { "const": "write-local-snapshot" }
+              ],
+              "items": false,
+              "minItems": 3,
+              "maxItems": 3
+            },
+            "deniedActions": {
+              "type": "array",
+              "prefixItems": [{ "const": "network-upload" }],
+              "items": false,
+              "minItems": 1,
+              "maxItems": 1
+            }
+          }
+        }
+      }
+    },
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fingerprint", "fingerprintBasis", "displayName", "vcs", "rootPathIncluded", "headCommit", "branch", "detachedHead", "remote", "bare"],
+      "properties": {
+        "fingerprint": { "$ref": "#/$defs/sha256" },
+        "fingerprintBasis": { "enum": ["canonical-remote", "local-path"] },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "vcs": { "const": "git" },
+        "rootPathIncluded": { "const": false },
+        "headCommit": {
+          "anyOf": [
+            { "type": "string", "pattern": "^[a-f0-9]{40,64}$" },
+            { "type": "null" }
+          ]
+        },
+        "branch": {
+          "anyOf": [
+            { "type": "string", "minLength": 1, "maxLength": 256 },
+            { "type": "null" }
+          ]
+        },
+        "detachedHead": { "type": "boolean" },
+        "remote": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["repositoryPathHash"],
+              "properties": {
+                "repositoryPathHash": { "$ref": "#/$defs/sha256" }
+              }
+            },
+            { "type": "null" }
+          ]
+        },
+        "bare": { "type": "boolean" }
+      }
+    },
+    "timeWindow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end", "timezone", "startBasis", "endBasis"],
+      "properties": {
+        "start": { "$ref": "#/$defs/dateTime" },
+        "end": { "$ref": "#/$defs/dateTime" },
+        "timezone": { "const": "UTC" },
+        "startBasis": { "enum": ["explicit", "default-lookback", "empty-repository"] },
+        "endBasis": { "enum": ["explicit", "latest-session", "head-commit", "unix-epoch"] }
+      }
+    },
+    "tokenUsage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["inputTokens", "cachedInputTokens", "outputTokens", "reasoningOutputTokens", "totalTokens"],
+      "properties": {
+        "inputTokens": { "$ref": "#/$defs/nonNegativeInteger" },
+        "cachedInputTokens": { "$ref": "#/$defs/nonNegativeInteger" },
+        "outputTokens": { "$ref": "#/$defs/nonNegativeInteger" },
+        "reasoningOutputTokens": { "$ref": "#/$defs/nonNegativeInteger" },
+        "totalTokens": { "$ref": "#/$defs/nonNegativeInteger" }
+      }
+    },
+    "session": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sessionRef", "provider", "sourceKind", "startedAt", "endedAt", "status", "workingDirectoryRelation", "summary", "turns", "assistantMessages", "toolCalls", "modelRefs", "toolRefs", "tokenUsage"],
+      "properties": {
+        "sessionRef": { "type": "string", "pattern": "^ses_[a-f0-9]{20}$" },
+        "provider": { "const": "codex" },
+        "sourceKind": { "enum": ["active", "archived", "custom"] },
+        "startedAt": { "$ref": "#/$defs/dateTime" },
+        "endedAt": { "$ref": "#/$defs/dateTime" },
+        "status": { "enum": ["completed", "aborted", "incomplete", "unknown"] },
+        "workingDirectoryRelation": { "enum": ["repository-root", "subdirectory"] },
+        "summary": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "turns": { "$ref": "#/$defs/nonNegativeInteger" },
+        "assistantMessages": { "$ref": "#/$defs/nonNegativeInteger" },
+        "toolCalls": { "$ref": "#/$defs/nonNegativeInteger" },
+        "modelRefs": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 160 }
+        },
+        "toolRefs": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 160 }
+        },
+        "tokenUsage": {
+          "anyOf": [
+            { "$ref": "#/$defs/tokenUsage" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tools", "models", "totalToolCalls", "totalTurns", "tokenUsage"],
+      "properties": {
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "callCount", "sessionCount"],
+            "properties": {
+              "name": { "type": "string", "minLength": 1, "maxLength": 160 },
+              "callCount": { "$ref": "#/$defs/nonNegativeInteger" },
+              "sessionCount": { "$ref": "#/$defs/nonNegativeInteger" }
+            }
+          }
+        },
+        "models": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["provider", "name", "turnCount", "sessionCount"],
+            "properties": {
+              "provider": { "type": "string", "minLength": 1, "maxLength": 80 },
+              "name": { "type": "string", "minLength": 1, "maxLength": 160 },
+              "turnCount": { "$ref": "#/$defs/nonNegativeInteger" },
+              "sessionCount": { "$ref": "#/$defs/nonNegativeInteger" }
+            }
+          }
+        },
+        "totalToolCalls": { "$ref": "#/$defs/nonNegativeInteger" },
+        "totalTurns": { "$ref": "#/$defs/nonNegativeInteger" },
+        "tokenUsage": {
+          "anyOf": [
+            { "$ref": "#/$defs/tokenUsage" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "git": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commits", "mergeCommits", "contributors", "fileTouches", "insertions", "deletions", "workingTree"],
+      "properties": {
+        "commits": { "$ref": "#/$defs/nonNegativeInteger" },
+        "mergeCommits": { "$ref": "#/$defs/nonNegativeInteger" },
+        "contributors": { "$ref": "#/$defs/nonNegativeInteger" },
+        "fileTouches": { "$ref": "#/$defs/nonNegativeInteger" },
+        "insertions": { "$ref": "#/$defs/nonNegativeInteger" },
+        "deletions": { "$ref": "#/$defs/nonNegativeInteger" },
+        "workingTree": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["isDirty", "stagedEntries", "modifiedEntries", "untrackedEntries", "conflictedEntries"],
+          "properties": {
+            "isDirty": { "type": "boolean" },
+            "stagedEntries": { "$ref": "#/$defs/nonNegativeInteger" },
+            "modifiedEntries": { "$ref": "#/$defs/nonNegativeInteger" },
+            "untrackedEntries": { "$ref": "#/$defs/nonNegativeInteger" },
+            "conflictedEntries": { "$ref": "#/$defs/nonNegativeInteger" }
+          }
+        }
+      }
+    },
+    "milestone": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["milestoneId", "kind", "title", "summary", "occurredAt", "evidenceRefs"],
+      "properties": {
+        "milestoneId": { "type": "string", "pattern": "^mil_[a-f0-9]{20}$" },
+        "kind": { "enum": ["session-activity", "repository-activity"] },
+        "title": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "summary": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "occurredAt": { "$ref": "#/$defs/dateTime" },
+        "evidenceRefs": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^ev_[a-f0-9]{20}$" }
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["evidenceId", "source", "kind", "observedAt", "digest"],
+      "properties": {
+        "evidenceId": { "type": "string", "pattern": "^ev_[a-f0-9]{20}$" },
+        "source": { "enum": ["codex", "git"] },
+        "kind": { "enum": ["session-boundary", "tool-activity", "git-aggregate"] },
+        "observedAt": { "$ref": "#/$defs/dateTime" },
+        "digest": { "$ref": "#/$defs/sha256" },
+        "sessionRef": { "type": "string", "pattern": "^ses_[a-f0-9]{20}$" },
+        "eventOrdinal": { "$ref": "#/$defs/nonNegativeInteger" }
+      }
+    },
+    "redactionCategory": {
+      "enum": ["private-key", "anthropic-key", "aws-access-key", "github-token", "gitlab-token", "slack-token", "stripe-key", "twilio-key", "openai-key", "huggingface-token", "npm-token", "pypi-token", "google-api-key", "oauth-token", "azure-storage-key", "cloudflare-token", "jwt", "authorization", "credential-url", "sensitive-assignment", "high-entropy", "control-character"]
+    },
+    "redaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["applied", "findings", "categories", "metadataValuesScanned", "metadataValuesTruncated", "transcriptBodiesDiscarded", "toolPayloadsDiscarded", "finalLeakCheckPassed", "limitations"],
+      "properties": {
+        "applied": { "const": true },
+        "findings": { "$ref": "#/$defs/nonNegativeInteger" },
+        "categories": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["category", "count"],
+            "properties": {
+              "category": { "$ref": "#/$defs/redactionCategory" },
+              "count": { "type": "integer", "minimum": 1 }
+            }
+          }
+        },
+        "metadataValuesScanned": { "$ref": "#/$defs/nonNegativeInteger" },
+        "metadataValuesTruncated": { "$ref": "#/$defs/nonNegativeInteger" },
+        "transcriptBodiesDiscarded": { "$ref": "#/$defs/nonNegativeInteger" },
+        "toolPayloadsDiscarded": { "$ref": "#/$defs/nonNegativeInteger" },
+        "finalLeakCheckPassed": { "const": true },
+        "limitations": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1, "maxLength": 400 }
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scanner", "collectionMode", "sessionFormat", "deterministicSerialization", "repositoryCommands", "sourceFilesConsidered", "sourceFilesParsed", "sourceFilesSkipped"],
+      "properties": {
+        "scanner": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "version"],
+          "properties": {
+            "name": { "enum": ["buildstory", "story-scanner"] },
+            "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?$" }
+          }
+        },
+        "collectionMode": { "const": "local-read-only" },
+        "sessionFormat": { "const": "codex-jsonl" },
+        "deterministicSerialization": { "const": "lexicographic-json" },
+        "repositoryCommands": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "enum": ["git-config", "git-log-shortstat", "git-rev-list", "git-rev-parse", "git-show", "git-status"] }
+        },
+        "sourceFilesConsidered": { "$ref": "#/$defs/nonNegativeInteger" },
+        "sourceFilesParsed": { "$ref": "#/$defs/nonNegativeInteger" },
+        "sourceFilesSkipped": { "$ref": "#/$defs/nonNegativeInteger" }
+      }
+    },
+    "warning": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "severity", "message"],
+      "properties": {
+        "code": { "enum": ["CODEX_ROOT_UNAVAILABLE", "SESSION_FILE_LIMIT_REACHED", "SESSION_FILE_TOO_LARGE", "SESSION_LINE_TOO_LARGE", "SESSION_LINE_INVALID_JSON", "SESSION_MISSING_METADATA", "SESSION_TIMESTAMP_INVALID", "SESSION_MODEL_UNKNOWN", "SESSION_ACTIVE_AT_SCAN_END", "GIT_HISTORY_UNAVAILABLE", "GIT_STATUS_UNAVAILABLE", "NO_MATCHING_SESSIONS"] },
+        "severity": { "enum": ["info", "warning"] },
+        "message": { "type": "string", "minLength": 1, "maxLength": 300 },
+        "sessionRef": { "type": "string", "pattern": "^ses_[a-f0-9]{20}$" }
+      }
+    },
+    "quality": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["level", "warningCount", "warnings", "assumptions"],
+      "properties": {
+        "level": { "enum": ["high", "medium", "low"] },
+        "warningCount": { "$ref": "#/$defs/nonNegativeInteger" },
+        "warnings": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/warning" }
+        },
+        "assumptions": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1, "maxLength": 400 }
+        }
+      }
+    }
+  }
+}

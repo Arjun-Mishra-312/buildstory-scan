@@ -1,0 +1,31 @@
+import type { EvidenceReference, QualityWarning, SessionSummary } from "../contract.js";
+import type { Redactor } from "../redaction.js";
+
+export interface ProviderSession {
+  summary: SessionSummary;
+  toolCounts: Map<string, number>;
+  modelCounts: Map<string, { provider: string; turns: number }>;
+  evidence: EvidenceReference[];
+}
+
+export interface ProviderDiscoveryResult {
+  provider: "codex";
+  rootsConsidered: number;
+  filesDiscovered: number;
+  filesParsed: number;
+  filesSkipped: number;
+  sessionsMatched: number;
+  sessions: ProviderSession[];
+  warnings: QualityWarning[];
+}
+
+export interface ProviderDiscoveryContext {
+  repositoryRoot: string;
+  repositoryFingerprint: string;
+  redactor: Redactor;
+}
+
+export interface SessionProviderAdapter {
+  readonly provider: "codex";
+  discover(context: ProviderDiscoveryContext): Promise<ProviderDiscoveryResult>;
+}

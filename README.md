@@ -1,0 +1,190 @@
+# BuildStory Scanner
+
+BuildStory Scanner is a TypeScript/Node.js CLI for a desktop-first community of AI-assisted software builders. It inspects one user-selected Git worktree read-only, discovers repository-scoped Codex sessions, discards content-bearing fields locally, and emits a deterministic `ProjectSnapshot 1.0.0`.
+
+Version `0.3.0` adds a real end-to-end transport to a separately running **local** BuildStory web app. No remote endpoint is accepted. The package remains private and unpublished.
+
+In the consolidated repository, source lives at `packages/buildstory-scanner`, the web app lives at `apps/buildstory-web`, and the verified installable archive is `artifacts/buildstory-scanner-0.3.0.tgz`. Nothing depends on the earlier Codex artifact folders.
+
+## Install on PowerShell
+
+Requirements: Node.js 20+ and Git.
+
+From this source directory:
+
+```powershell
+Set-Location 'C:\path\to\story-scanner'
+npm ci
+npm run build
+npm install --global .
+
+Get-Command buildstory
+buildstory --version
+```
+
+For development, `npm link` can replace the global install:
+
+```powershell
+npm ci
+npm run build
+npm link
+Get-Command buildstory
+```
+
+To install the unpublished local tarball:
+
+```powershell
+npm install --global 'C:\path\to\buildstory-scanner-0.3.0.tgz'
+buildstory --version
+```
+
+Do not advertise `npx buildstory`: npm could search the public registry for an unrelated package.
+
+If PowerShell says `buildstory` is not recognized, add npm's global command directory to this session:
+
+```powershell
+$npmGlobal = npm prefix --global
+$env:Path = "$npmGlobal;$env:Path"
+Get-Command buildstory
+buildstory --version
+```
+
+If execution policy blocks npm's `.ps1` shim, run the generated `.cmd` shim:
+
+```powershell
+$buildstory = Join-Path (npm prefix --global) 'buildstory.cmd'
+& $buildstory --version
+```
+
+Source-tree fallback:
+
+```powershell
+node '.\dist\src\cli.js' --version
+```
+
+## Local dashboard workflow
+
+These commands require the separate BuildStory web app to be running on the stated loopback URL. Replace the example session values with the values displayed by that local dashboard.
+
+Stage 1 connects and stores a short-lived grant. It does **not** read a repository or upload a snapshot:
+
+```powershell
+$api = 'http://127.0.0.1:3000/'
+buildstory connect 'UPLOAD_SESSION_ID' --code 'DEVICE_CODE' --api-base-url $api
+buildstory status
+```
+
+Stage 2 runs from the selected repository, requires separate scan and upload consent, validates locally, and performs the grant's single allowed `PUT`:
+
+```powershell
+Set-Location 'C:\path\to\selected-repository'
+buildstory scan-upload --repo . --consent local-scan --upload-consent local-dashboard
+buildstory status
+```
+
+Optional time bounds and an alternate Codex root remain available:
+
+```powershell
+buildstory scan-upload --repo . `
+  --codex-home 'C:\Users\me\.codex' `
+  --since '2026-07-01T00:00:00Z' `
+  --until '2026-08-01T00:00:00Z' `
+  --consent local-scan `
+  --upload-consent local-dashboard
+```
+
+The connect response grants exactly one snapshot `PUT`. After acceptance, the same bearer is retained locally only until expiry for authenticated, read-only status/report `GET`s. A second `scan-upload` is refused and requires a fresh dashboard connection. Browser cookies are omitted on every CLI request and never authorize CLI routes.
+
+Only `http://localhost`, `http://127.x.x.x`, `http://[::1]`, and their HTTPS equivalents are accepted. Remote hosts, redirects, embedded URL credentials, query strings, fragments, cross-origin grant URLs, and cross-origin status/report URLs fail closed.
+
+### Mock mode
+
+This in-process mode verifies installation and argument parsing only:
+
+```powershell
+buildstory connect 'UPLOAD_SESSION_ID' --code 'DEVICE_CODE' --api-base-url 'mock://local'
+```
+
+It makes no network request, does not contact the dashboard, and creates no upload grant. A later `scan-upload` therefore fails with `UPLOAD_CONNECTION_REQUIRED`.
+
+Common actionable errors:
+
+- `CONNECT_ENDPOINT_REQUIRED`: pass the running local web app URL with `--api-base-url`.
+- `CONNECT_UNAVAILABLE`: start the local web app and verify its port.
+- `CONNECT_REJECTED`: copy a fresh session ID and device code from the dashboard.
+- `UPLOAD_CONNECTION_REQUIRED`: complete a real loopback connect; mock mode is not enough.
+- `UPLOAD_UNAVAILABLE`: the grant was claimed before the attempted PUT; check the dashboard and reconnect before retrying.
+- `UPLOAD_GRANT_ALREADY_USED`: use `buildstory status` or connect again for another upload.
+
+See [`docs/connect-protocol.md`](docs/connect-protocol.md) and [`docs/upload-lifecycle.md`](docs/upload-lifecycle.md) for the exact wire contract.
+
+## Local-only inspect and scan
+
+These commands never use the network:
+
+```powershell
+buildstory inspect --repo 'C:\path\to\repository'
+buildstory scan --repo 'C:\path\to\repository' --consent local-scan --dry-run
+buildstory scan --repo 'C:\path\to\repository' --consent local-scan --output 'C:\outside-repository\project-snapshot.json'
+```
+
+`inspect` never opens AI session sources. `scan` requires `--consent local-scan`. Choose exactly one local output mode:
+
+- `--dry-run` validates and prints the redacted payload without writing a file.
+- `--output` atomically writes a mode-0600 file where supported. Its parent must exist outside the selected repository; replacing a file requires `--overwrite`.
+
+Without an explicit end, the deterministic window uses the latest matched-session or HEAD-commit timestamp, then the Unix epoch. Without a start, it uses a 30-day lookback. Identical inputs and options produce identical canonical bytes and scan IDs.
+
+## Contract and privacy boundary
+
+- Portable schema: [`schema/project-snapshot.schema.json`](schema/project-snapshot.schema.json)
+- TypeScript contract: [`src/contract.ts`](src/contract.ts)
+- Content-free fixture: [`examples/project-snapshot.example.json`](examples/project-snapshot.example.json)
+- Architecture: [`docs/architecture.md`](docs/architecture.md)
+- Privacy/redaction: [`docs/privacy.md`](docs/privacy.md)
+
+The schema uses `additionalProperties: false` throughout. It cannot represent source/file bodies, diffs, patches, prompts, assistant responses, transcript bodies, tool arguments/results, commit subjects, author identities, absolute paths, raw remote URLs, or remote hosts. A remote-backed repository identity contains only opaque hashes.
+
+The selected worktree is never opened for file-body reads. Git runs with optional locks disabled and returns identity plus status/history aggregates. Codex JSONL is streamed under file/line limits; content-bearing values are ignored and discarded after structural counts. Retained strings are bounded and redacted, then the complete canonical snapshot receives schema validation, forbidden-field checks, and fail-closed secret plus URL/host/path scans immediately before upload.
+
+`--consent local-scan` authorizes only local collection. `--upload-consent local-dashboard` is separate, command-scoped consent for the already validated snapshot and only works with a live one-PUT loopback grant. No background retry, telemetry, remote fallback, or pending snapshot queue exists.
+
+## Dashboard command wording
+
+Recommended PowerShell copy for the local demo:
+
+```text
+Install the unpublished local CLI first (Node.js 20+):
+  npm install --global "C:\path\to\buildstory-scanner-0.3.0.tgz"
+
+With the local BuildStory web app running:
+  buildstory connect "UPLOAD_SESSION_ID" --code "DEVICE_CODE" --api-base-url "http://127.0.0.1:3000/"
+
+From the selected Git repository:
+  buildstory scan-upload --repo . --consent local-scan --upload-consent local-dashboard
+
+Then check the local result:
+  buildstory status
+```
+
+`story-scanner` remains a backward-compatible binary alias, but new dashboard copy should use `buildstory`.
+
+## Design references and provenance
+
+The architecture was informed by, but does not copy or claim compatibility with:
+
+- Y Combinator's official [Paxel overview](https://paxel.ycombinator.com/) and [technical data-handling documentation](https://paxel.ycombinator.com/data-handling): useful reference ideas include local Docker analysis, read-only repository mounting, repository/session consent controls, bounded/redacted outbound structures, and explicit source/transcript boundaries.
+- [`staru09/open-paxel`](https://github.com/staru09/open-paxel), cited only as an independent third-party local-first implementation example.
+
+No Paxel or Open Paxel implementation was copied, imported, or used as a dependency. BuildStory deliberately keeps a narrower payload: no transcript excerpts, file paths, commit subjects, author details, remote hosts, raw remotes, LLM calls, or source database. These references were reviewed on 2026-08-03 and are provenance context, not normative dependencies.
+
+## Development and smoke tests
+
+```powershell
+npm ci
+npm test
+npm run test:e2e
+npm pack
+```
+
+`npm test` includes a package smoke test that packs the unpublished package, installs it under a fresh npm prefix, and invokes `buildstory` through PowerShell. `npm run test:e2e` starts an ephemeral loopback HTTP server and verifies connect, canonical one-PUT upload, replay refusal, authenticated status/report GETs, and absence of repository paths, remote hosts, transcript bodies, and tool payloads from the wire body. Nothing is published or deployed.

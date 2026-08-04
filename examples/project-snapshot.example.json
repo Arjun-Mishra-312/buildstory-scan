@@ -1,0 +1,207 @@
+{
+  "schemaVersion": "1.0.0",
+  "scanId": "scan_0123456789abcdef01234567",
+  "generatedAt": "2026-08-03T12:00:00.000Z",
+  "sourceSelection": {
+    "providers": [
+      {
+        "provider": "codex",
+        "selected": true,
+        "repositoryScoped": true,
+        "rootsConsidered": 2,
+        "filesDiscovered": 3,
+        "sessionsMatched": 1,
+        "sessionsIncluded": 1
+      }
+    ],
+    "consent": {
+      "mode": "explicit-cli",
+      "statementVersion": "1.0",
+      "approvedActions": [
+        "read-repository-metadata",
+        "read-selected-local-session-metadata",
+        "write-local-snapshot"
+      ],
+      "deniedActions": [
+        "network-upload"
+      ]
+    }
+  },
+  "repository": {
+    "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "fingerprintBasis": "canonical-remote",
+    "displayName": "sample-project",
+    "vcs": "git",
+    "rootPathIncluded": false,
+    "headCommit": "1111111111111111111111111111111111111111",
+    "branch": "main",
+    "detachedHead": false,
+    "remote": {
+      "repositoryPathHash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "bare": false
+  },
+  "timeWindow": {
+    "start": "2026-07-04T12:00:00.000Z",
+    "end": "2026-08-03T12:00:00.000Z",
+    "timezone": "UTC",
+    "startBasis": "default-lookback",
+    "endBasis": "latest-session"
+  },
+  "sessions": [
+    {
+      "sessionRef": "ses_22222222222222222222",
+      "provider": "codex",
+      "sourceKind": "active",
+      "startedAt": "2026-08-03T11:30:00.000Z",
+      "endedAt": "2026-08-03T12:00:00.000Z",
+      "status": "completed",
+      "workingDirectoryRelation": "repository-root",
+      "summary": "Codex session with 3 user turns, 4 assistant messages, and 5 tool calls.",
+      "turns": 3,
+      "assistantMessages": 4,
+      "toolCalls": 5,
+      "modelRefs": [
+        "example-model"
+      ],
+      "toolRefs": [
+        "shell"
+      ],
+      "tokenUsage": {
+        "inputTokens": 1000,
+        "cachedInputTokens": 200,
+        "outputTokens": 400,
+        "reasoningOutputTokens": 80,
+        "totalTokens": 1400
+      }
+    }
+  ],
+  "usage": {
+    "tools": [
+      {
+        "name": "shell",
+        "callCount": 5,
+        "sessionCount": 1
+      }
+    ],
+    "models": [
+      {
+        "provider": "openai",
+        "name": "example-model",
+        "turnCount": 3,
+        "sessionCount": 1
+      }
+    ],
+    "totalToolCalls": 5,
+    "totalTurns": 3,
+    "tokenUsage": {
+      "inputTokens": 1000,
+      "cachedInputTokens": 200,
+      "outputTokens": 400,
+      "reasoningOutputTokens": 80,
+      "totalTokens": 1400
+    }
+  },
+  "git": {
+    "commits": 2,
+    "mergeCommits": 0,
+    "contributors": 1,
+    "fileTouches": 6,
+    "insertions": 120,
+    "deletions": 35,
+    "workingTree": {
+      "isDirty": false,
+      "stagedEntries": 0,
+      "modifiedEntries": 0,
+      "untrackedEntries": 0,
+      "conflictedEntries": 0
+    }
+  },
+  "milestones": [
+    {
+      "milestoneId": "mil_33333333333333333333",
+      "kind": "session-activity",
+      "title": "Codex session activity",
+      "summary": "Codex session with 3 user turns, 4 assistant messages, and 5 tool calls.",
+      "occurredAt": "2026-08-03T12:00:00.000Z",
+      "evidenceRefs": [
+        "ev_44444444444444444444"
+      ]
+    },
+    {
+      "milestoneId": "mil_55555555555555555555",
+      "kind": "repository-activity",
+      "title": "Repository activity",
+      "summary": "2 commits observed in the selected time window.",
+      "occurredAt": "2026-08-03T12:00:00.000Z",
+      "evidenceRefs": [
+        "ev_66666666666666666666"
+      ]
+    }
+  ],
+  "evidence": [
+    {
+      "evidenceId": "ev_44444444444444444444",
+      "source": "codex",
+      "kind": "session-boundary",
+      "observedAt": "2026-08-03T11:30:00.000Z",
+      "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "sessionRef": "ses_22222222222222222222",
+      "eventOrdinal": 1
+    },
+    {
+      "evidenceId": "ev_66666666666666666666",
+      "source": "git",
+      "kind": "git-aggregate",
+      "observedAt": "2026-08-03T12:00:00.000Z",
+      "digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    }
+  ],
+  "redaction": {
+    "applied": true,
+    "findings": 0,
+    "categories": [],
+    "metadataValuesScanned": 8,
+    "metadataValuesTruncated": 0,
+    "transcriptBodiesDiscarded": 7,
+    "toolPayloadsDiscarded": 5,
+    "finalLeakCheckPassed": true,
+    "limitations": [
+      "Pattern matching cannot identify every secret, especially novel formats or low-entropy credentials.",
+      "Repository names, branch names, tool names, and model names are metadata and may still be identifying after redaction.",
+      "JSONL records are parsed in local process memory; transcript bodies and tool payloads are immediately discarded and never serialized.",
+      "Opaque hashes prevent direct disclosure but can permit correlation, and low-entropy inputs may be guessable."
+    ]
+  },
+  "provenance": {
+    "scanner": {
+      "name": "buildstory",
+      "version": "0.3.0"
+    },
+    "collectionMode": "local-read-only",
+    "sessionFormat": "codex-jsonl",
+    "deterministicSerialization": "lexicographic-json",
+    "repositoryCommands": [
+      "git-config",
+      "git-log-shortstat",
+      "git-rev-list",
+      "git-rev-parse",
+      "git-show",
+      "git-status"
+    ],
+    "sourceFilesConsidered": 3,
+    "sourceFilesParsed": 3,
+    "sourceFilesSkipped": 0
+  },
+  "quality": {
+    "level": "high",
+    "warningCount": 0,
+    "warnings": [],
+    "assumptions": [
+      "Codex sessions are repository-scoped from session or turn-context working-directory metadata.",
+      "User-turn and assistant-message counts prefer event records and fall back to response records to avoid double counting.",
+      "When no explicit start is supplied, the scanner uses a deterministic 30-day lookback from the effective end.",
+      "Git fileTouches is the sum of per-commit changed-file counts and is not a unique-file count."
+    ]
+  }
+}
