@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://story-scanner.local/schemas/project-snapshot-1.0.0.json",
+  "$id": "https://story-scanner.local/schemas/project-snapshot-1.1.0.json",
   "title": "ProjectSnapshot",
   "description": "Privacy-preserving aggregate of repository and AI coding-session activity. Transcript bodies, tool payloads, paths, diffs, and source text are intentionally not representable.",
   "type": "object",
@@ -22,7 +22,7 @@
     "quality"
   ],
   "properties": {
-    "schemaVersion": { "const": "1.0.0" },
+    "schemaVersion": { "const": "1.1.0" },
     "scanId": { "type": "string", "pattern": "^scan_[a-f0-9]{24}$" },
     "generatedAt": { "$ref": "#/$defs/dateTime" },
     "sourceSelection": { "$ref": "#/$defs/sourceSelection" },
@@ -73,7 +73,7 @@
             "additionalProperties": false,
             "required": ["provider", "selected", "repositoryScoped", "rootsConsidered", "filesDiscovered", "sessionsMatched", "sessionsIncluded"],
             "properties": {
-              "provider": { "const": "codex" },
+              "provider": { "enum": ["codex", "claude-code"] },
               "selected": { "const": true },
               "repositoryScoped": { "const": true },
               "rootsConsidered": { "$ref": "#/$defs/nonNegativeInteger" },
@@ -172,7 +172,11 @@
         "cachedInputTokens": { "$ref": "#/$defs/nonNegativeInteger" },
         "outputTokens": { "$ref": "#/$defs/nonNegativeInteger" },
         "reasoningOutputTokens": { "$ref": "#/$defs/nonNegativeInteger" },
-        "totalTokens": { "$ref": "#/$defs/nonNegativeInteger" }
+        "totalTokens": { "$ref": "#/$defs/nonNegativeInteger" },
+        "cacheCreationInputTokens": { "$ref": "#/$defs/nonNegativeInteger" },
+        "cacheCreation1hInputTokens": { "$ref": "#/$defs/nonNegativeInteger" },
+        "cacheCreation5mInputTokens": { "$ref": "#/$defs/nonNegativeInteger" },
+        "cacheReadInputTokens": { "$ref": "#/$defs/nonNegativeInteger" }
       }
     },
     "session": {
@@ -181,7 +185,7 @@
       "required": ["sessionRef", "provider", "sourceKind", "startedAt", "endedAt", "status", "workingDirectoryRelation", "summary", "turns", "assistantMessages", "toolCalls", "modelRefs", "toolRefs", "tokenUsage"],
       "properties": {
         "sessionRef": { "type": "string", "pattern": "^ses_[a-f0-9]{20}$" },
-        "provider": { "const": "codex" },
+        "provider": { "enum": ["codex", "claude-code"] },
         "sourceKind": { "enum": ["active", "archived", "custom"] },
         "startedAt": { "$ref": "#/$defs/dateTime" },
         "endedAt": { "$ref": "#/$defs/dateTime" },
@@ -206,7 +210,9 @@
             { "$ref": "#/$defs/tokenUsage" },
             { "type": "null" }
           ]
-        }
+        },
+        "planModeTurns": { "$ref": "#/$defs/nonNegativeInteger" },
+        "subagentInvocations": { "$ref": "#/$defs/nonNegativeInteger" }
       }
     },
     "usage": {
@@ -300,7 +306,7 @@
       "required": ["evidenceId", "source", "kind", "observedAt", "digest"],
       "properties": {
         "evidenceId": { "type": "string", "pattern": "^ev_[a-f0-9]{20}$" },
-        "source": { "enum": ["codex", "git"] },
+        "source": { "enum": ["codex", "claude-code", "git"] },
         "kind": { "enum": ["session-boundary", "tool-activity", "git-aggregate"] },
         "observedAt": { "$ref": "#/$defs/dateTime" },
         "digest": { "$ref": "#/$defs/sha256" },
@@ -345,7 +351,7 @@
     "provenance": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["scanner", "collectionMode", "sessionFormat", "deterministicSerialization", "repositoryCommands", "sourceFilesConsidered", "sourceFilesParsed", "sourceFilesSkipped"],
+      "required": ["scanner", "collectionMode", "sessionFormats", "deterministicSerialization", "repositoryCommands", "sourceFilesConsidered", "sourceFilesParsed", "sourceFilesSkipped"],
       "properties": {
         "scanner": {
           "type": "object",
@@ -357,7 +363,12 @@
           }
         },
         "collectionMode": { "const": "local-read-only" },
-        "sessionFormat": { "const": "codex-jsonl" },
+        "sessionFormats": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "enum": ["codex-jsonl", "claude-code-jsonl"] }
+        },
         "deterministicSerialization": { "const": "lexicographic-json" },
         "repositoryCommands": {
           "type": "array",
@@ -374,7 +385,7 @@
       "additionalProperties": false,
       "required": ["code", "severity", "message"],
       "properties": {
-        "code": { "enum": ["CODEX_ROOT_UNAVAILABLE", "SESSION_FILE_LIMIT_REACHED", "SESSION_FILE_TOO_LARGE", "SESSION_LINE_TOO_LARGE", "SESSION_LINE_INVALID_JSON", "SESSION_MISSING_METADATA", "SESSION_TIMESTAMP_INVALID", "SESSION_MODEL_UNKNOWN", "SESSION_ACTIVE_AT_SCAN_END", "GIT_HISTORY_UNAVAILABLE", "GIT_STATUS_UNAVAILABLE", "NO_MATCHING_SESSIONS"] },
+        "code": { "enum": ["CODEX_ROOT_UNAVAILABLE", "CLAUDE_CODE_ROOT_UNAVAILABLE", "SESSION_FILE_LIMIT_REACHED", "SESSION_FILE_TOO_LARGE", "SESSION_LINE_TOO_LARGE", "SESSION_LINE_INVALID_JSON", "SESSION_MISSING_METADATA", "SESSION_TIMESTAMP_INVALID", "SESSION_MODEL_UNKNOWN", "SESSION_ACTIVE_AT_SCAN_END", "GIT_HISTORY_UNAVAILABLE", "GIT_STATUS_UNAVAILABLE", "NO_MATCHING_SESSIONS"] },
         "severity": { "enum": ["info", "warning"] },
         "message": { "type": "string", "minLength": 1, "maxLength": 300 },
         "sessionRef": { "type": "string", "pattern": "^ses_[a-f0-9]{20}$" }

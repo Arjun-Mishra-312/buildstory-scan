@@ -1,5 +1,5 @@
 {
-  "schemaVersion": "1.0.0",
+  "schemaVersion": "1.1.0",
   "scanId": "scan_0123456789abcdef01234567",
   "generatedAt": "2026-08-03T12:00:00.000Z",
   "sourceSelection": {
@@ -179,7 +179,9 @@
       "version": "0.3.0"
     },
     "collectionMode": "local-read-only",
-    "sessionFormat": "codex-jsonl",
+    "sessionFormats": [
+      "codex-jsonl"
+    ],
     "deterministicSerialization": "lexicographic-json",
     "repositoryCommands": [
       "git-config",
@@ -198,10 +200,10 @@
     "warningCount": 0,
     "warnings": [],
     "assumptions": [
-      "Codex sessions are repository-scoped from session or turn-context working-directory metadata.",
-      "User-turn and assistant-message counts prefer event records and fall back to response records to avoid double counting.",
       "When no explicit start is supplied, the scanner uses a deterministic 30-day lookback from the effective end.",
-      "Git fileTouches is the sum of per-commit changed-file counts and is not a unique-file count."
+      "Git fileTouches is the sum of per-commit changed-file counts and is not a unique-file count.",
+      "Codex sessions are repository-scoped from session or turn-context working-directory metadata.",
+      "User-turn and assistant-message counts prefer event records and fall back to response records to avoid double counting."
     ]
   }
 }

@@ -14,6 +14,7 @@ test("builds a deterministic, repository-scoped ProjectSnapshot", async () => {
     const options = {
       repositoryPath: fixture.repository,
       consent: "local-scan" as const,
+      providers: ["codex"] as ["codex"],
       codexHome: fixture.codexHome,
       since: "2026-08-03T00:00:00Z",
       until: "2026-08-04T00:00:00Z",
@@ -73,6 +74,7 @@ test("writes validated snapshots only outside the selected repository", async ()
     const snapshot = await buildProjectSnapshot({
       repositoryPath: fixture.repository,
       consent: "local-scan",
+      providers: ["codex"],
       codexHome: fixture.codexHome,
       since: "2026-08-03T00:00:00Z",
       until: "2026-08-04T00:00:00Z",

@@ -1,4 +1,3 @@
-import { createReadStream } from "node:fs";
 import { lstat, readdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -10,7 +9,8 @@ import type {
   SessionSummary,
   TokenUsage,
 } from "../contract.js";
-import { isPathWithin } from "../repository.js";
+import { consumeJsonLines } from "./jsonl.js";
+import { relationToRepository } from "./path-scope.js";
 import type {
   ProviderDiscoveryContext,
   ProviderDiscoveryResult,
@@ -20,7 +20,6 @@ import type {
 
 const MAX_SESSION_FILES = 5_000;
 const MAX_SESSION_FILE_BYTES = 128 * 1024 * 1024;
-const MAX_JSONL_LINE_BYTES = 4 * 1024 * 1024;
 const MAX_DISCOVERY_LINES = 100;
 const MAX_DISCOVERY_DEPTH = 6;
 
@@ -75,19 +74,6 @@ function addCount(map: Map<string, number>, key: string, count = 1): void {
   map.set(key, (map.get(key) ?? 0) + count);
 }
 
-function normalizeForComparison(value: string): string {
-  const normalized = path.normalize(path.resolve(value));
-  return process.platform === "win32" ? normalized.toLocaleLowerCase("en-US") : normalized;
-}
-
-function relationToRepository(repositoryRoot: string, cwd: string): SessionSummary["workingDirectoryRelation"] | null {
-  if (!path.isAbsolute(cwd)) return null;
-  const root = normalizeForComparison(repositoryRoot);
-  const candidate = normalizeForComparison(cwd);
-  if (!isPathWithin(root, candidate)) return null;
-  return root === candidate ? "repository-root" : "subdirectory";
-}
-
 function parseTokenUsage(payload: JsonRecord): TokenUsage | null {
   const info = asRecord(payload.info);
   const usage = asRecord(info?.total_token_usage ?? payload.total_token_usage);
@@ -99,66 +85,6 @@ function parseTokenUsage(payload: JsonRecord): TokenUsage | null {
   const reportedTotal = asNonNegativeInteger(usage.total_tokens);
   const totalTokens = reportedTotal || inputTokens + outputTokens;
   return { inputTokens, cachedInputTokens, outputTokens, reasoningOutputTokens, totalTokens };
-}
-
-async function consumeJsonLines(
-  filePath: string,
-  onLine: (line: Buffer, ordinal: number) => boolean,
-): Promise<{ oversizedLines: number }> {
-  const stream = createReadStream(filePath, { highWaterMark: 64 * 1024 });
-  let carry = Buffer.alloc(0);
-  let discarding = false;
-  let oversizedLines = 0;
-  let ordinal = 0;
-  let stopped = false;
-
-  for await (const rawChunk of stream) {
-    if (stopped) break;
-    const chunk = Buffer.isBuffer(rawChunk) ? rawChunk : Buffer.from(rawChunk);
-    let offset = 0;
-    while (offset < chunk.length) {
-      const newline = chunk.indexOf(0x0a, offset);
-      if (newline < 0) {
-        if (!discarding) {
-          const remainder = chunk.subarray(offset);
-          if (carry.length + remainder.length > MAX_JSONL_LINE_BYTES) {
-            carry = Buffer.alloc(0);
-            discarding = true;
-            oversizedLines += 1;
-          } else {
-            carry = carry.length === 0 ? Buffer.from(remainder) : Buffer.concat([carry, remainder]);
-          }
-        }
-        break;
-      }
-
-      const segment = chunk.subarray(offset, newline);
-      offset = newline + 1;
-      ordinal += 1;
-      if (discarding) {
-        discarding = false;
-        continue;
-      }
-      if (carry.length + segment.length > MAX_JSONL_LINE_BYTES) {
-        carry = Buffer.alloc(0);
-        oversizedLines += 1;
-        continue;
-      }
-      let line = carry.length === 0 ? Buffer.from(segment) : Buffer.concat([carry, segment]);
-      carry = Buffer.alloc(0);
-      if (line.at(-1) === 0x0d) line = line.subarray(0, -1);
-      if (line.length > 0 && !onLine(line, ordinal)) {
-        stopped = true;
-        break;
-      }
-    }
-  }
-
-  if (!stopped && !discarding && carry.length > 0) {
-    ordinal += 1;
-    onLine(carry, ordinal);
-  }
-  return { oversizedLines };
 }
 
 function warning(
@@ -450,6 +376,7 @@ export interface CodexAdapterOptions {
 
 export class CodexSessionAdapter implements SessionProviderAdapter {
   public readonly provider = "codex" as const;
+  public readonly sessionFormat = "codex-jsonl" as const;
   private readonly roots: CodexSourceRoot[];
 
   public constructor(options: CodexAdapterOptions = {}) {
@@ -514,6 +441,7 @@ export class CodexSessionAdapter implements SessionProviderAdapter {
 
     return {
       provider: "codex",
+      sessionFormat: "codex-jsonl",
       rootsConsidered: this.roots.length,
       filesDiscovered: locatedFiles.length,
       filesParsed,

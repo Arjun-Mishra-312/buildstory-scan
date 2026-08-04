@@ -2,6 +2,7 @@ import type {
   EvidenceReference,
   Milestone,
   ProjectSnapshot,
+  ProviderId,
   QualityWarning,
   TimeWindow,
   TokenUsage,
@@ -18,19 +19,24 @@ import { ScannerError } from "./errors.js";
 import { collectGitMetrics, inspectRepository } from "./repository.js";
 import { detectKnownSecrets, Redactor } from "./redaction.js";
 import { detectPrivateLocations } from "./privacy-boundary.js";
+import { ClaudeCodeSessionAdapter } from "./sources/claude-code.js";
 import { CodexSessionAdapter } from "./sources/codex.js";
 import type { ProviderDiscoveryResult, ProviderSession, SessionProviderAdapter } from "./sources/types.js";
 import { validateProjectSnapshot } from "./validation.js";
 
 const DEFAULT_LOOKBACK_MILLISECONDS = 30 * 24 * 60 * 60 * 1_000;
 const UNIX_EPOCH = "1970-01-01T00:00:00.000Z";
+const KNOWN_PROVIDERS: ReadonlySet<ProviderId> = new Set(["codex", "claude-code"]);
 
 export interface ScanOptions {
   repositoryPath: string;
   consent: "local-scan";
   since?: string;
   until?: string;
+  /** Providers to scan. Defaults to every provider this scanner supports. */
+  providers?: ProviderId[];
   codexHome?: string;
+  claudeCodeHome?: string;
   adapters?: SessionProviderAdapter[];
 }
 
@@ -105,19 +111,53 @@ function intersectsWindow(session: ProviderSession, window: TimeWindow): boolean
   return session.summary.endedAt >= window.start && session.summary.startedAt <= window.end;
 }
 
+const OPTIONAL_TOKEN_FIELDS = [
+  "cacheCreationInputTokens",
+  "cacheCreation1hInputTokens",
+  "cacheCreation5mInputTokens",
+  "cacheReadInputTokens",
+] as const satisfies ReadonlyArray<keyof TokenUsage>;
+
 function sumTokens(values: Array<TokenUsage | null>): TokenUsage | null {
   const present = values.filter((value): value is TokenUsage => value !== null);
   if (present.length === 0) return null;
-  return present.reduce<TokenUsage>(
-    (total, value) => ({
-      inputTokens: safeSum(total.inputTokens, value.inputTokens),
-      cachedInputTokens: safeSum(total.cachedInputTokens, value.cachedInputTokens),
-      outputTokens: safeSum(total.outputTokens, value.outputTokens),
-      reasoningOutputTokens: safeSum(total.reasoningOutputTokens, value.reasoningOutputTokens),
-      totalTokens: safeSum(total.totalTokens, value.totalTokens),
-    }),
-    { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 0 },
-  );
+  const totals: { -readonly [K in keyof TokenUsage]-?: number } = {
+    inputTokens: 0,
+    cachedInputTokens: 0,
+    outputTokens: 0,
+    reasoningOutputTokens: 0,
+    totalTokens: 0,
+    cacheCreationInputTokens: 0,
+    cacheCreation1hInputTokens: 0,
+    cacheCreation5mInputTokens: 0,
+    cacheReadInputTokens: 0,
+  };
+  const seenOptional = new Set<keyof TokenUsage>();
+  for (const value of present) {
+    totals.inputTokens = safeSum(totals.inputTokens, value.inputTokens);
+    totals.cachedInputTokens = safeSum(totals.cachedInputTokens, value.cachedInputTokens);
+    totals.outputTokens = safeSum(totals.outputTokens, value.outputTokens);
+    totals.reasoningOutputTokens = safeSum(totals.reasoningOutputTokens, value.reasoningOutputTokens);
+    totals.totalTokens = safeSum(totals.totalTokens, value.totalTokens);
+    for (const field of OPTIONAL_TOKEN_FIELDS) {
+      const fieldValue = value[field];
+      if (fieldValue === undefined) continue;
+      seenOptional.add(field);
+      totals[field] = safeSum(totals[field], fieldValue);
+    }
+  }
+
+  const result: TokenUsage = {
+    inputTokens: totals.inputTokens,
+    cachedInputTokens: totals.cachedInputTokens,
+    outputTokens: totals.outputTokens,
+    reasoningOutputTokens: totals.reasoningOutputTokens,
+    totalTokens: totals.totalTokens,
+  };
+  for (const field of OPTIONAL_TOKEN_FIELDS) {
+    if (seenOptional.has(field)) result[field] = totals[field];
+  }
+  return result;
 }
 
 function safeSum(left: number, right: number): number {
@@ -161,12 +201,46 @@ function aggregateUsage(sessions: ProviderSession[]): UsageSummary {
   };
 }
 
+/** Human-facing label for a provider id. Shared verbatim with the web app's deterministic-text check. */
+export function providerLabel(provider: ProviderId): string {
+  return provider === "claude-code" ? "Claude Code" : "Codex";
+}
+
+/**
+ * Assumption strings the web app's upload boundary re-derives and compares
+ * byte-for-byte, so a scanner-generated snapshot can be told apart from
+ * hand-written text. Generic assumptions always apply; provider-specific
+ * ones are appended only when that provider actually contributed sessions,
+ * in `providerIds` order (which is always sorted).
+ */
+export function assumptionsForProviders(providerIds: ProviderId[]): string[] {
+  const assumptions = [
+    "When no explicit start is supplied, the scanner uses a deterministic 30-day lookback from the effective end.",
+    "Git fileTouches is the sum of per-commit changed-file counts and is not a unique-file count.",
+  ];
+  if (providerIds.includes("codex")) {
+    assumptions.push(
+      "Codex sessions are repository-scoped from session or turn-context working-directory metadata.",
+      "User-turn and assistant-message counts prefer event records and fall back to response records to avoid double counting.",
+    );
+  }
+  if (providerIds.includes("claude-code")) {
+    assumptions.push(
+      "Claude Code sessions are repository-scoped from the working directory recorded on transcript lines.",
+      "Claude Code turn counts exclude tool-result continuation lines; only author-authored messages are counted as turns.",
+      "Claude Code token usage is summed per assistant message rather than read from a cumulative counter.",
+      "Claude Code subagent invocations and their token usage are counted from a sibling transcript directory when present.",
+    );
+  }
+  return assumptions;
+}
+
 function createSessionMilestone(session: ProviderSession): Milestone {
   const evidenceRefs = session.evidence.map((item) => item.evidenceId).sort(compareStrings);
   return {
     milestoneId: `mil_${shortHash(`session-activity\0${session.summary.sessionRef}`, 20)}`,
     kind: "session-activity",
-    title: "Codex session activity",
+    title: `${providerLabel(session.summary.provider)} session activity`,
     summary: session.summary.summary,
     occurredAt: session.summary.endedAt,
     evidenceRefs,
@@ -211,9 +285,30 @@ export async function buildProjectSnapshot(options: ScanOptions): Promise<Projec
 
   const redactor = new Redactor();
   const repository = await inspectRepository(options.repositoryPath, redactor);
-  const adapters = options.adapters ?? [new CodexSessionAdapter(options.codexHome ? { codexHome: options.codexHome } : {})];
-  if (adapters.length !== 1 || adapters[0]?.provider !== "codex") {
-    throw new ScannerError("UNSUPPORTED_PROVIDER", "ProjectSnapshot 1.0.0 supports the Codex provider only.");
+  const selectedProviders = options.providers ?? [...KNOWN_PROVIDERS].sort(compareStrings);
+  const defaultAdapters: Record<ProviderId, () => SessionProviderAdapter> = {
+    codex: () => new CodexSessionAdapter(options.codexHome ? { codexHome: options.codexHome } : {}),
+    "claude-code": () =>
+      new ClaudeCodeSessionAdapter(options.claudeCodeHome ? { claudeCodeHome: options.claudeCodeHome } : {}),
+  };
+  const adapters = (
+    options.adapters ?? selectedProviders.map((provider) => defaultAdapters[provider]())
+  ).slice().sort((left, right) => compareStrings(left.provider, right.provider));
+
+  if (adapters.length === 0) {
+    throw new ScannerError("UNSUPPORTED_PROVIDER", "At least one session provider must be selected.");
+  }
+  const providerIds = adapters.map((adapter) => adapter.provider);
+  if (new Set(providerIds).size !== providerIds.length) {
+    throw new ScannerError("UNSUPPORTED_PROVIDER", "Each session provider adapter must be distinct.");
+  }
+  for (const id of providerIds) {
+    if (!KNOWN_PROVIDERS.has(id)) {
+      throw new ScannerError(
+        "UNSUPPORTED_PROVIDER",
+        `ProjectSnapshot ${PROJECT_SNAPSHOT_SCHEMA_VERSION} does not support the "${id}" provider.`,
+      );
+    }
   }
 
   const discoveries = await Promise.all(
@@ -287,7 +382,13 @@ export async function buildProjectSnapshot(options: ScanOptions): Promise<Projec
     },
     repository: repository.identity,
     timeWindow,
-    sessions: includedSessions.map((session) => session.summary),
+    sessions: includedSessions
+      .slice()
+      .sort((left, right) =>
+        compareStrings(left.summary.startedAt, right.summary.startedAt) ||
+        compareStrings(left.summary.sessionRef, right.summary.sessionRef),
+      )
+      .map((session) => session.summary),
     usage,
     git: gitResult.metrics,
     milestones: milestones.sort((left, right) => compareStrings(left.occurredAt, right.occurredAt) || compareStrings(left.milestoneId, right.milestoneId)),
@@ -296,7 +397,7 @@ export async function buildProjectSnapshot(options: ScanOptions): Promise<Projec
     provenance: {
       scanner: { name: SCANNER_NAME, version: SCANNER_VERSION },
       collectionMode: "local-read-only",
-      sessionFormat: "codex-jsonl",
+      sessionFormats: [...new Set(discoveries.map((result) => result.sessionFormat))].sort(compareStrings),
       deterministicSerialization: "lexicographic-json",
       repositoryCommands: [...repository.commands].sort(compareStrings),
       sourceFilesConsidered: discoveries.reduce((sum, result) => sum + result.filesDiscovered, 0),
@@ -307,12 +408,7 @@ export async function buildProjectSnapshot(options: ScanOptions): Promise<Projec
       level: qualityLevel(allWarnings, sourceFilesSkipped),
       warningCount: allWarnings.length,
       warnings: allWarnings,
-      assumptions: [
-        "Codex sessions are repository-scoped from session or turn-context working-directory metadata.",
-        "User-turn and assistant-message counts prefer event records and fall back to response records to avoid double counting.",
-        "When no explicit start is supplied, the scanner uses a deterministic 30-day lookback from the effective end.",
-        "Git fileTouches is the sum of per-commit changed-file counts and is not a unique-file count.",
-      ],
+      assumptions: assumptionsForProviders(providerIds),
     },
   };
 

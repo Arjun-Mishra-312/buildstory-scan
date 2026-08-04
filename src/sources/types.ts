@@ -1,4 +1,4 @@
-import type { EvidenceReference, QualityWarning, SessionSummary } from "../contract.js";
+import type { EvidenceReference, ProviderId, QualityWarning, SessionFormat, SessionSummary } from "../contract.js";
 import type { Redactor } from "../redaction.js";
 
 export interface ProviderSession {
@@ -9,7 +9,8 @@ export interface ProviderSession {
 }
 
 export interface ProviderDiscoveryResult {
-  provider: "codex";
+  provider: ProviderId;
+  sessionFormat: SessionFormat;
   rootsConsidered: number;
   filesDiscovered: number;
   filesParsed: number;
@@ -26,6 +27,7 @@ export interface ProviderDiscoveryContext {
 }
 
 export interface SessionProviderAdapter {
-  readonly provider: "codex";
+  readonly provider: ProviderId;
+  readonly sessionFormat: SessionFormat;
   discover(context: ProviderDiscoveryContext): Promise<ProviderDiscoveryResult>;
 }

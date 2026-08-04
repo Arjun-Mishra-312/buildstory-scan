@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { connectBuildStory } from "../src/connect.js";
+import { PROJECT_SNAPSHOT_SCHEMA_VERSION } from "../src/contract.js";
 import { ScannerError } from "../src/errors.js";
 
 test("mock connection is explicit and performs no network request", async () => {
@@ -74,7 +75,7 @@ test("connect rejects a grant that would send the bearer to a remote endpoint", 
           bearerToken: "fixture-one-use-bearer-token-001",
           snapshotEndpoint: "https://remote.example.invalid/upload",
           expiresAt: new Date(Date.now() + 60_000).toISOString(),
-          schemaVersion: "1.0.0",
+          schemaVersion: PROJECT_SNAPSHOT_SCHEMA_VERSION,
           maxBytes: 1024,
         },
       }), { status: 200, headers: { "content-type": "application/json" } }),

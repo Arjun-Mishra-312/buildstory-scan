@@ -4,7 +4,8 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { canonicalJson } from "./canonical-json.js";
 import { connectBuildStory } from "./connect.js";
-import { SCANNER_VERSION } from "./contract.js";
+import type { ProviderId } from "./contract.js";
+import { PROJECT_SNAPSHOT_SCHEMA_VERSION, SCANNER_VERSION } from "./contract.js";
 import { ScannerError, safeErrorMessage } from "./errors.js";
 import { readLocalDashboardStatus, uploadProjectSnapshot } from "./local-upload.js";
 import { writeSnapshotFile } from "./output.js";
@@ -33,8 +34,11 @@ Connection options:
 
 Scanner options:
   --repo <directory>         Selected Git worktree (required; use . for the current repo).
-  --source codex             Session provider; Codex is the only v1 provider (default).
+  --source <list>            Comma-separated providers to scan: codex, claude-code
+                             (default: every supported provider).
   --codex-home <directory>   Override the Codex session root.
+  --claude-code-home <directory>
+                             Override the Claude Code config directory (parent of "projects").
   --since <ISO-8601>         Inclusive activity-window start.
   --until <ISO-8601>         Inclusive activity-window end.
   --consent local-scan       Allow local repository/session metadata reads.
@@ -49,7 +53,7 @@ Scanner options:
 
 connect never scans or uploads. scan never uses the network. scan-upload is the
 only snapshot network path and accepts loopback endpoints only. It sends exactly
-one canonical, schema-validated ProjectSnapshot 1.0.0 using a short-lived grant.
+one canonical, schema-validated ProjectSnapshot ${PROJECT_SNAPSHOT_SCHEMA_VERSION} using a short-lived grant.
 Browser cookies, redirects, remote URLs, source/file bodies, diffs, transcript
 bodies, tool arguments/results, file paths, remote hosts, and secret text are not sent.
 `;
@@ -57,8 +61,9 @@ bodies, tool arguments/results, file paths, remote hosts, and secret text are no
 interface ParsedScannerArguments {
   command: "inspect" | "scan" | "scan-upload";
   repo: string;
-  source: "codex";
+  source: ProviderId[];
   codexHome?: string;
+  claudeCodeHome?: string;
   since?: string;
   until?: string;
   consent?: string;
@@ -88,12 +93,14 @@ const SCANNER_VALUE_OPTIONS = new Set([
   "--repo",
   "--source",
   "--codex-home",
+  "--claude-code-home",
   "--since",
   "--until",
   "--consent",
   "--upload-consent",
   "--output",
 ]);
+const KNOWN_PROVIDERS: ReadonlySet<ProviderId> = new Set(["codex", "claude-code"]);
 const SCANNER_BOOLEAN_OPTIONS = new Set(["--dry-run", "--overwrite", "--quiet"]);
 const CONNECT_VALUE_OPTIONS = new Set(["--code", "--api-base-url", "--timeout-ms"]);
 
@@ -190,20 +197,36 @@ function parseScannerArguments(
 
   const repo = values.get("--repo");
   if (!repo) throw new ScannerError("REPOSITORY_REQUIRED", "--repo is required; use --repo . for the current repository.", 2);
-  const source = values.get("--source") ?? "codex";
-  if (source !== "codex") {
-    throw new ScannerError("UNSUPPORTED_PROVIDER", "ProjectSnapshot 1.0.0 supports --source codex only.", 2);
+  const rawSource = values.get("--source");
+  const source = rawSource
+    ? rawSource.split(",").map((value) => value.trim()).filter((value) => value.length > 0)
+    : [...KNOWN_PROVIDERS];
+  if (source.length === 0) {
+    throw new ScannerError("UNSUPPORTED_PROVIDER", "--source must name at least one provider.", 2);
+  }
+  if (new Set(source).size !== source.length) {
+    throw new ScannerError("DUPLICATE_OPTION", "--source lists the same provider more than once.", 2);
+  }
+  for (const provider of source) {
+    if (!KNOWN_PROVIDERS.has(provider as ProviderId)) {
+      throw new ScannerError(
+        "UNSUPPORTED_PROVIDER",
+        `--source does not support "${provider}"; use codex, claude-code, or a comma-separated list of both.`,
+        2,
+      );
+    }
   }
 
   const common = {
     command,
     repo,
-    source,
+    source: source as ProviderId[],
     dryRun: flags.has("--dry-run"),
     overwrite: flags.has("--overwrite"),
     quiet: flags.has("--quiet"),
   } as const;
   const codexHome = values.get("--codex-home");
+  const claudeCodeHome = values.get("--claude-code-home");
   const since = values.get("--since");
   const until = values.get("--until");
   const consent = values.get("--consent");
@@ -212,6 +235,7 @@ function parseScannerArguments(
   return {
     ...common,
     ...(codexHome ? { codexHome } : {}),
+    ...(claudeCodeHome ? { claudeCodeHome } : {}),
     ...(since ? { since } : {}),
     ...(until ? { until } : {}),
     ...(consent ? { consent } : {}),
@@ -234,7 +258,7 @@ function parseArguments(argv: string[]): ParsedArguments | "help" | "version" {
 
 function validateScannerArguments(args: ParsedScannerArguments): void {
   if (args.command === "inspect") {
-    if (args.dryRun || args.output || args.overwrite || args.consent || args.uploadConsent || args.codexHome || args.since || args.until) {
+    if (args.dryRun || args.output || args.overwrite || args.consent || args.uploadConsent || args.codexHome || args.claudeCodeHome || args.since || args.until) {
       throw new ScannerError("INSPECT_OPTION_INVALID", "inspect accepts only --repo, --source, and --quiet.", 2);
     }
     return;
@@ -277,7 +301,9 @@ function scanOptions(parsed: ParsedScannerArguments) {
   return {
     repositoryPath: parsed.repo,
     consent: "local-scan" as const,
+    providers: parsed.source,
     ...(parsed.codexHome ? { codexHome: parsed.codexHome } : {}),
+    ...(parsed.claudeCodeHome ? { claudeCodeHome: parsed.claudeCodeHome } : {}),
     ...(parsed.since ? { since: parsed.since } : {}),
     ...(parsed.until ? { until: parsed.until } : {}),
   };

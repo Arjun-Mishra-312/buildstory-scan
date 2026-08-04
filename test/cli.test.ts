@@ -7,6 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { canonicalJson } from "../src/canonical-json.js";
+import { PROJECT_SNAPSHOT_SCHEMA_VERSION } from "../src/contract.js";
 import { validateProjectSnapshot } from "../src/validation.js";
 import { createLocalFixture } from "./helpers.js";
 
@@ -68,7 +69,7 @@ test("CLI connect performs only the documented handshake and stores a bounded gr
           bearerToken: "fixture-one-use-bearer-token-001",
           snapshotEndpoint: "/api/v1/cli/snapshots/fixture-001",
           expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
-          schemaVersion: "1.0.0",
+          schemaVersion: PROJECT_SNAPSHOT_SCHEMA_VERSION,
           maxBytes: 1024 * 1024,
         },
       }));
@@ -156,7 +157,7 @@ test("CLI completes connect, validated one-PUT upload, and authenticated status 
             bearerToken,
             snapshotEndpoint: "/api/v1/cli/snapshots/fixture-002",
             expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
-            schemaVersion: "1.0.0",
+            schemaVersion: PROJECT_SNAPSHOT_SCHEMA_VERSION,
             maxBytes: 1024 * 1024,
           },
         }));
@@ -205,6 +206,7 @@ test("CLI completes connect, validated one-PUT upload, and authenticated status 
     const scanUploadArguments = [
       "scan-upload",
       "--repo", fixture.repository,
+      "--source", "codex",
       "--codex-home", fixture.codexHome,
       "--consent", "local-scan",
       "--upload-consent", "local-dashboard",
@@ -213,7 +215,10 @@ test("CLI completes connect, validated one-PUT upload, and authenticated status 
     ];
     const upload = await runProcess(scanUploadArguments, environment);
     assert.equal(upload.exitCode, 0, upload.stderr);
-    assert.match(upload.stdout, /Validated and uploaded ProjectSnapshot 1\.0\.0/);
+    assert.match(
+      upload.stdout,
+      new RegExp(`Validated and uploaded ProjectSnapshot ${PROJECT_SNAPSHOT_SCHEMA_VERSION.replaceAll(".", "\\.")}`),
+    );
     assert.match(upload.stdout, /accepted the one-PUT snapshot/);
     assert.equal(upload.stdout.includes(fixture.repository), false);
     assert.equal(upload.stdout.includes(bearerToken), false);
@@ -252,7 +257,7 @@ test("CLI completes connect, validated one-PUT upload, and authenticated status 
 test("CLI requires local-scan consent before discovery", async () => {
   const fixture = await createLocalFixture();
   try {
-    const result = await runProcess(["scan", "--repo", fixture.repository, "--dry-run"]);
+    const result = await runProcess(["scan", "--repo", fixture.repository, "--source", "codex", "--dry-run"]);
     assert.equal(result.exitCode, 2);
     assert.equal(result.stdout, "");
     assert.match(result.stderr, /CONSENT_REQUIRED/);
@@ -268,6 +273,7 @@ test("CLI dry-run emits a valid payload and writes no snapshot", async () => {
     const result = await runProcess([
       "scan",
       "--repo", fixture.repository,
+      "--source", "codex",
       "--codex-home", fixture.codexHome,
       "--consent", "local-scan",
       "--since", "2026-08-03T00:00:00Z",
@@ -290,6 +296,7 @@ test("CLI output mode writes a validated snapshot outside the repository", async
     const result = await runProcess([
       "scan",
       "--repo", fixture.repository,
+      "--source", "codex",
       "--codex-home", fixture.codexHome,
       "--consent", "local-scan",
       "--since", "2026-08-03T00:00:00Z",
@@ -298,7 +305,7 @@ test("CLI output mode writes a validated snapshot outside the repository", async
     ]);
     assert.equal(result.exitCode, 0, result.stderr);
     assert.equal(result.stderr, "");
-    assert.match(result.stdout, /Wrote 1\.0\.0 snapshot scan_/);
+    assert.match(result.stdout, new RegExp(`Wrote ${PROJECT_SNAPSHOT_SCHEMA_VERSION.replaceAll(".", "\\.")} snapshot scan_`));
     const snapshot: unknown = JSON.parse(await readFile(outputPath, "utf8"));
     validateProjectSnapshot(snapshot);
   } finally {
