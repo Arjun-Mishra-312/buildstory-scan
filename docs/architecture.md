@@ -11,11 +11,11 @@ selected Codex roots ----bounded JSONL------> Codex adapter ------structure---+-
                                                                                       |
                                                                            canonical ProjectSnapshot
                                                                                       |
-dashboard code --> loopback connect --> short-lived grant --> explicit upload consent |
-                                                                                      v
-                                                                      one PUT to loopback API
-                                                                                      |
-                                                                authenticated status/report GETs
+dashboard code --> pinned-origin connect --> short-lived grant --> explicit upload consent |
+                                                                                          v
+                                                              one PUT to the pinned origin
+                                                                                          |
+                                                                    authenticated status/report GETs
 ```
 
 There is no repository/snapshot arrow into connect and no raw-input arrow into transport. `ProjectSnapshot` is an allowlist assembled from normalized aggregates, not a redacted clone of Git or session input.
@@ -28,7 +28,7 @@ There is no repository/snapshot arrow into connect and no raw-input arrow into t
 
 `scanner.ts` derives a stable UTC window, filters sessions, aggregates model/tool/token use, builds structural milestones and opaque evidence, and produces the scan ID from canonical payload content. `redaction.ts` sanitizes retained strings. `validation.ts` uses the portable Draft 2020-12 schema. Identical inputs/options produce identical bytes.
 
-`connect.ts` preserves protocol 1.0's bounded POST request and validates its new nested upload grant. It accepts mock mode or explicit loopback HTTP(S) only, rejects redirects/cookies/remote URLs, caps responses, and never persists the dashboard session ID, device code, or connection ID.
+`connect.ts` preserves protocol 1.0's bounded POST request and validates its new nested upload grant. It accepts mock mode, loopback HTTP(S), or one explicit HTTPS host confirmed via `--allow-host`/`--remote`; rejects redirects, cookies, and any other or unconfirmed host; caps responses; and never persists the dashboard session ID, device code, or connection ID.
 
 `connection-state.ts` is the only credential store. It uses platform-local state, refuses a symlink as its final directory/file, performs exclusive temporary writes and replacement, and requests 0700/0600 modes. State has two discriminated forms:
 
@@ -39,7 +39,7 @@ The ready file is atomically claimed and removed before PUT, preventing concurre
 
 `local-upload.ts` is the data-plane implementation. It accepts a `ProjectSnapshot`, revalidates and canonicalizes it, enforces forbidden keys and secret scanning, compares byte limits, and performs one `PUT` with the canonical JSON itself. It validates a digest-bound receipt before recording read-only access. Status/report reads use strict bounded response shapes and redact the only free-form report string before output.
 
-`transport.ts` exposes `SnapshotTransport` and `LoopbackSnapshotTransport`. The method signature can receive a `ProjectSnapshot` only—not a repository path, provider adapter, raw record, Git output, source/diff content, device credentials, or logging callback. Remote transport is explicitly false.
+`transport.ts` exposes `SnapshotTransport` and `LoopbackSnapshotTransport`. The method signature can receive a `ProjectSnapshot` only—not a repository path, provider adapter, raw record, Git output, source/diff content, device credentials, or logging callback. Transport talks only to the single origin pinned by the preceding connect, loopback or an explicitly confirmed HTTPS remote host - never an arbitrary or unconfirmed one.
 
 `output.ts` remains the local file boundary. It writes atomically outside the chosen worktree and never participates in upload.
 
@@ -55,7 +55,7 @@ Commands are deliberately separated:
 - `connect`: credentials in, local grant out; no scan/upload;
 - `inspect`: repository identity only; no session read/network;
 - `scan`: local scan plus stdout/file output; no network;
-- `scan-upload`: local scan, validation, explicit consent, one loopback PUT;
+- `scan-upload`: local scan, validation, explicit consent, one PUT to the connected origin;
 - `status`: local grant state or authenticated read-only dashboard GETs.
 
 ## Determinism and schema sharing

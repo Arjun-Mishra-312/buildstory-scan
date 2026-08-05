@@ -26,17 +26,63 @@ test("mock connection is explicit and performs no network request", async () => 
   });
 });
 
-test("connect refuses remote and credential-bearing endpoints", async () => {
-  for (const apiBaseUrl of ["https://api.example.invalid", "http://user:secret@127.0.0.1:8787"]) {
+test("connect refuses credential-bearing and unpinned-http-remote endpoints regardless of --allow-host", async () => {
+  for (const apiBaseUrl of ["http://user:secret@127.0.0.1:8787", "http://api.example.invalid"]) {
     await assert.rejects(
       connectBuildStory({
         uploadSessionId: "session-demo-001",
         deviceCode: "DEVICE-CODE-001",
         apiBaseUrl,
+        allowHost: "api.example.invalid",
       }),
       (error: unknown) => error instanceof ScannerError && error.code === "CONNECT_ENDPOINT_NOT_LOCAL",
     );
   }
+});
+
+test("connect refuses a remote HTTPS endpoint without a matching --allow-host", async () => {
+  await assert.rejects(
+    connectBuildStory({
+      uploadSessionId: "session-demo-001",
+      deviceCode: "DEVICE-CODE-001",
+      apiBaseUrl: "https://api.example.invalid",
+    }),
+    (error: unknown) => error instanceof ScannerError && error.code === "CONNECT_ALLOW_HOST_REQUIRED",
+  );
+
+  await assert.rejects(
+    connectBuildStory({
+      uploadSessionId: "session-demo-001",
+      deviceCode: "DEVICE-CODE-001",
+      apiBaseUrl: "https://api.example.invalid",
+      allowHost: "other.example.invalid",
+    }),
+    (error: unknown) => error instanceof ScannerError && error.code === "CONNECT_ALLOW_HOST_MISMATCH",
+  );
+});
+
+test("connect accepts a remote HTTPS endpoint with a matching --allow-host", async () => {
+  const receipt = await connectBuildStory({
+    uploadSessionId: "session-demo-001",
+    deviceCode: "DEVICE-CODE-001",
+    apiBaseUrl: "https://api.example.invalid/",
+    allowHost: "API.Example.Invalid",
+    fetchImplementation: async () => new Response(JSON.stringify({
+      protocolVersion: "1.0",
+      status: "connected",
+      uploadSessionId: "session-demo-001",
+      connectionId: "remote-connection-001",
+      uploadGrant: {
+        bearerToken: "fixture-one-use-bearer-token-002",
+        snapshotEndpoint: "https://api.example.invalid/upload",
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        schemaVersion: PROJECT_SNAPSHOT_SCHEMA_VERSION,
+        maxBytes: 1024,
+      },
+    }), { status: 200, headers: { "content-type": "application/json" } }),
+  });
+  assert.equal(receipt.mode, "local-api");
+  assert.equal(receipt.endpointOrigin, "https://api.example.invalid");
 });
 
 test("unavailable local API returns an actionable content-free error", async () => {

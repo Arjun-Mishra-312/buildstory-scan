@@ -2,7 +2,7 @@
 
 BuildStory Scanner is a TypeScript/Node.js CLI for a desktop-first community of AI-assisted software builders. It inspects one user-selected Git worktree read-only, discovers repository-scoped Codex sessions, discards content-bearing fields locally, and emits a deterministic `ProjectSnapshot 1.0.0`.
 
-Version `0.3.0` adds a real end-to-end transport to a separately running **local** BuildStory web app. No remote endpoint is accepted. The package remains private and unpublished.
+Version `0.3.0` adds a real end-to-end transport to a BuildStory web app: a separately running **local** app by default, or a single explicitly pinned **HTTPS remote host** per connection (`--remote`, or `--api-base-url`/`--allow-host` for a non-default host). No unpinned or discovered remote endpoint is accepted. The package remains private and unpublished.
 
 In the consolidated repository, source lives at `packages/buildstory-scanner`, the web app lives at `apps/buildstory-web`, and the verified installable archive is `artifacts/buildstory-scanner-0.3.0.tgz`. Nothing depends on the earlier Codex artifact folders.
 
@@ -64,13 +64,20 @@ node '.\dist\src\cli.js' --version
 
 ## Local dashboard workflow
 
-These commands require the separate BuildStory web app to be running on the stated loopback URL. Replace the example session values with the values displayed by that local dashboard.
+These commands require a BuildStory web app running at the stated URL - a local loopback dev server by default, or the hosted app via `--remote`. Replace the example session values with the values displayed by that dashboard.
 
 Stage 1 connects and stores a short-lived grant. It does **not** read a repository or upload a snapshot:
 
 ```powershell
 $api = 'http://127.0.0.1:3000/'
 buildstory connect 'UPLOAD_SESSION_ID' --code 'DEVICE_CODE' --api-base-url $api
+buildstory status
+```
+
+Against the hosted app instead of a local dev server:
+
+```powershell
+buildstory connect 'UPLOAD_SESSION_ID' --code 'DEVICE_CODE' --remote
 buildstory status
 ```
 
@@ -95,7 +102,7 @@ buildstory scan-upload --repo . `
 
 The connect response grants exactly one snapshot `PUT`. After acceptance, the same bearer is retained locally only until expiry for authenticated, read-only status/report `GET`s. A second `scan-upload` is refused and requires a fresh dashboard connection. Browser cookies are omitted on every CLI request and never authorize CLI routes.
 
-Only `http://localhost`, `http://127.x.x.x`, `http://[::1]`, and their HTTPS equivalents are accepted. Remote hosts, redirects, embedded URL credentials, query strings, fragments, cross-origin grant URLs, and cross-origin status/report URLs fail closed.
+`http://localhost`, `http://127.x.x.x`, `http://[::1]`, and their HTTPS equivalents are always accepted. A non-loopback host is accepted only over HTTPS and only when `--allow-host` names its exact hostname (`--remote` sets both for the hosted origin). Redirects, embedded URL credentials, query strings, fragments, an unpinned or mismatched remote host, cross-origin grant URLs, and cross-origin status/report URLs fail closed.
 
 ### Mock mode
 
@@ -109,10 +116,11 @@ It makes no network request, does not contact the dashboard, and creates no uplo
 
 Common actionable errors:
 
-- `CONNECT_ENDPOINT_REQUIRED`: pass the running local web app URL with `--api-base-url`.
-- `CONNECT_UNAVAILABLE`: start the local web app and verify its port.
+- `CONNECT_ENDPOINT_REQUIRED`: pass the running web app URL with `--api-base-url`, or `--remote` for the hosted app.
+- `CONNECT_ALLOW_HOST_REQUIRED` / `CONNECT_ALLOW_HOST_MISMATCH`: a non-loopback `--api-base-url` needs a matching `--allow-host`.
+- `CONNECT_UNAVAILABLE`: start the local web app (or check connectivity to the remote host) and verify its port.
 - `CONNECT_REJECTED`: copy a fresh session ID and device code from the dashboard.
-- `UPLOAD_CONNECTION_REQUIRED`: complete a real loopback connect; mock mode is not enough.
+- `UPLOAD_CONNECTION_REQUIRED`: complete a real connect; mock mode is not enough.
 - `UPLOAD_UNAVAILABLE`: the grant was claimed before the attempted PUT; check the dashboard and reconnect before retrying.
 - `UPLOAD_GRANT_ALREADY_USED`: use `buildstory status` or connect again for another upload.
 
@@ -147,7 +155,7 @@ The schema uses `additionalProperties: false` throughout. It cannot represent so
 
 The selected worktree is never opened for file-body reads. Git runs with optional locks disabled and returns identity plus status/history aggregates. Codex JSONL is streamed under file/line limits; content-bearing values are ignored and discarded after structural counts. Retained strings are bounded and redacted, then the complete canonical snapshot receives schema validation, forbidden-field checks, and fail-closed secret plus URL/host/path scans immediately before upload.
 
-`--consent local-scan` authorizes only local collection. `--upload-consent local-dashboard` is separate, command-scoped consent for the already validated snapshot and only works with a live one-PUT loopback grant. No background retry, telemetry, remote fallback, or pending snapshot queue exists.
+`--consent local-scan` authorizes only local collection. `--upload-consent local-dashboard` is separate, command-scoped consent for the already validated snapshot and only works with a live one-PUT grant from the connected dashboard (local or pinned remote). No background retry, telemetry, unpinned remote fallback, or pending snapshot queue exists.
 
 ## Dashboard command wording
 

@@ -1,16 +1,16 @@
-# Local connection protocol 1.0
+# Connection protocol 1.0
 
-`buildstory connect UPLOAD_SESSION_ID --code DEVICE_CODE --api-base-url LOOPBACK_URL` exchanges dashboard device credentials for a bounded upload grant. Connect does not scan, read a repository, or upload a snapshot.
+`buildstory connect UPLOAD_SESSION_ID --code DEVICE_CODE --api-base-url LOOPBACK_URL` exchanges dashboard device credentials for a bounded upload grant. `buildstory connect UPLOAD_SESSION_ID --code DEVICE_CODE --remote` does the same against the hosted origin. Connect does not scan, read a repository, or upload a snapshot.
 
 ## Endpoint rules
 
-The API base comes from `--api-base-url`, then `BUILDSTORY_API_BASE_URL` as a compatibility fallback. The CLI accepts `mock://local` or loopback HTTP(S) only: `localhost`, `127.0.0.0/8`, and `::1`. It refuses remote hosts, URL credentials, queries, fragments, and redirects. A path prefix is supported; `api/v1/cli/connect` is appended beneath it.
+The API base comes from `--api-base-url`, then `BUILDSTORY_API_BASE_URL` as a compatibility fallback; `--remote` is shorthand for the hosted origin and cannot be combined with `--api-base-url` or `--allow-host`. The CLI accepts `mock://local`, loopback HTTP(S) (`localhost`, `127.0.0.0/8`, `::1`), or an explicit HTTPS host paired with `--allow-host` matching its exact hostname - a deliberate second confirmation before any grant is sent off this machine. It refuses HTTP for any non-loopback host, an `--api-base-url` alone with no matching `--allow-host`, URL credentials, queries, fragments, and redirects. A path prefix is supported; `api/v1/cli/connect` is appended beneath it.
 
 `mock://local` is in-process command validation. It contacts nothing and returns no grant.
 
 ## Connect request
 
-The existing request is unchanged. The loopback API receives one `POST` with `Content-Type: application/json`:
+The existing request is unchanged. The API receives one `POST` with `Content-Type: application/json`:
 
 ```json
 {
@@ -55,7 +55,7 @@ The upload-session ID and protocol must match the request. `connectionId` is val
 - expire in the future and no more than one hour after acceptance;
 - bind to `ProjectSnapshot 1.0.0`;
 - cap the body between 1 byte and the CLI's 8 MiB hard maximum;
-- provide a relative or absolute snapshot endpoint that resolves to the same loopback origin as the explicit API base;
+- provide a relative or absolute snapshot endpoint that resolves to the same origin as the explicit API base;
 - carry a non-empty bearer with no whitespace or control characters.
 
 The CLI persists only the grant. It never persists the device code, upload-session ID, connection ID, request body, repository data, or snapshot. State is placed in the platform-local application state directory, with directory/file modes 0700/0600 where supported. `BUILDSTORY_STATE_DIR` exists for isolated testing.

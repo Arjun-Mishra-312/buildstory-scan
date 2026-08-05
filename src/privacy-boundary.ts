@@ -39,3 +39,24 @@ export function detectPrivateLocations(value: unknown): PrivateLocationCategory[
   visit(value);
   return [...findings].sort();
 }
+
+/**
+ * Replaces (rather than fail-closes on) paths/URLs/hosts in free text.
+ * Used only for the opt-in narrative-evidence excerpt path, where the
+ * source text is genuine conversation and mentioning a file path is
+ * normal and expected - unlike every other field in ProjectSnapshot,
+ * which is scanner-generated metadata that should never contain one.
+ */
+export function replacePrivateLocations(text: string): { value: string; findings: PrivateLocationCategory[] } {
+  const findings = new Set<PrivateLocationCategory>();
+  let output = text;
+  for (const rule of locationRules) {
+    const global = new RegExp(rule.pattern.source, `${rule.pattern.flags.includes("g") ? rule.pattern.flags : `${rule.pattern.flags}g`}`);
+    output = output.replace(global, (match) => {
+      findings.add(rule.category);
+      const leadingWhitespace = /^[\s("'`=]/.exec(match)?.[0] ?? "";
+      return `${leadingWhitespace}[${rule.category}]`;
+    });
+  }
+  return { value: output, findings: [...findings].sort() };
+}

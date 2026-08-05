@@ -1,6 +1,6 @@
-# Loopback snapshot-upload lifecycle
+# Snapshot-upload lifecycle
 
-Version `0.3.0` implements one transport: a local web app on loopback. `LOOPBACK_SNAPSHOT_UPLOAD_IMPLEMENTED` and `NETWORK_UPLOAD_IMPLEMENTED` are `true`; `REMOTE_SNAPSHOT_UPLOAD_IMPLEMENTED` is `false`. There is no remote URL, fallback destination, background retry, telemetry channel, or pending snapshot queue.
+`LOOPBACK_SNAPSHOT_UPLOAD_IMPLEMENTED`, `REMOTE_SNAPSHOT_UPLOAD_IMPLEMENTED`, and `NETWORK_UPLOAD_IMPLEMENTED` are all `true`. Two transports exist: a local web app on loopback (the default, `--api-base-url <loopback-url>`), and a single explicitly pinned HTTPS remote host per connection (`--remote` for the hosted origin, or `--api-base-url <https-url> --allow-host <hostname>` for anything else, e.g. staging). There is no unpinned or discovered remote destination, fallback host, background retry, telemetry channel, or pending snapshot queue - each `connect` pins exactly one origin, and every later read or write in that connection is verified same-origin against it.
 
 ## State transitions
 
@@ -49,7 +49,7 @@ No cookie jar is used (`credentials: omit`), redirects are refused, and the body
 }
 ```
 
-`statusUrl` is required. `reportUrl` may be `null`. Both must resolve to loopback, same-origin URLs without credentials, queries, or fragments.
+`statusUrl` is required. `reportUrl` may be `null`. Both must resolve to same-origin URLs (loopback, or the one pinned remote host for this connection) without credentials, queries, or fragments.
 
 ## Authenticated status/report GETs
 

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://story-scanner.local/schemas/project-snapshot-1.1.0.json",
+  "$id": "https://story-scanner.local/schemas/project-snapshot-1.2.0.json",
   "title": "ProjectSnapshot",
   "description": "Privacy-preserving aggregate of repository and AI coding-session activity. Transcript bodies, tool payloads, paths, diffs, and source text are intentionally not representable.",
   "type": "object",
@@ -22,7 +22,7 @@
     "quality"
   ],
   "properties": {
-    "schemaVersion": { "const": "1.1.0" },
+    "schemaVersion": { "const": "1.2.0" },
     "scanId": { "type": "string", "pattern": "^scan_[a-f0-9]{24}$" },
     "generatedAt": { "$ref": "#/$defs/dateTime" },
     "sourceSelection": { "$ref": "#/$defs/sourceSelection" },
@@ -44,7 +44,8 @@
     },
     "redaction": { "$ref": "#/$defs/redaction" },
     "provenance": { "$ref": "#/$defs/provenance" },
-    "quality": { "$ref": "#/$defs/quality" }
+    "quality": { "$ref": "#/$defs/quality" },
+    "narrativeEvidence": { "$ref": "#/$defs/narrativeEvidence" }
   },
   "$defs": {
     "dateTime": {
@@ -405,6 +406,69 @@
         "assumptions": {
           "type": "array",
           "items": { "type": "string", "minLength": 1, "maxLength": 400 }
+        }
+      }
+    },
+    "narrativeExcerpt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["excerptId", "sessionRef", "occurredAt", "role", "text"],
+      "properties": {
+        "excerptId": { "type": "string", "pattern": "^exc_[a-f0-9]{20}$" },
+        "sessionRef": { "type": "string", "pattern": "^ses_[a-f0-9]{20}$" },
+        "occurredAt": { "$ref": "#/$defs/dateTime" },
+        "role": { "enum": ["session-title", "user-intent", "plan-transition", "assistant-decision", "outcome"] },
+        "text": { "type": "string", "minLength": 1, "maxLength": 600 }
+      }
+    },
+    "narrativeEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bundleVersion", "generatedAt", "policy", "consent", "excerpts", "discarded"],
+      "properties": {
+        "bundleVersion": { "const": "1.0.0" },
+        "generatedAt": { "$ref": "#/$defs/dateTime" },
+        "policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["maxExcerpts", "maxCharsPerExcerpt", "maxTotalChars", "excerptSelection"],
+          "properties": {
+            "maxExcerpts": { "$ref": "#/$defs/nonNegativeInteger" },
+            "maxCharsPerExcerpt": { "$ref": "#/$defs/nonNegativeInteger" },
+            "maxTotalChars": { "$ref": "#/$defs/nonNegativeInteger" },
+            "excerptSelection": { "const": "deterministic-heuristic-v1" }
+          }
+        },
+        "consent": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "statementVersion", "approvedActions"],
+          "properties": {
+            "mode": { "const": "explicit-cli-review" },
+            "statementVersion": { "const": "1.0" },
+            "approvedActions": {
+              "type": "array",
+              "prefixItems": [{ "const": "send-redacted-excerpts-to-configured-cloud-model" }],
+              "items": false,
+              "minItems": 1,
+              "maxItems": 1
+            }
+          }
+        },
+        "excerpts": {
+          "type": "array",
+          "maxItems": 100,
+          "items": { "$ref": "#/$defs/narrativeExcerpt" }
+        },
+        "discarded": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["candidates", "rejectedByRedaction", "rejectedByBudget"],
+          "properties": {
+            "candidates": { "$ref": "#/$defs/nonNegativeInteger" },
+            "rejectedByRedaction": { "$ref": "#/$defs/nonNegativeInteger" },
+            "rejectedByBudget": { "$ref": "#/$defs/nonNegativeInteger" }
+          }
         }
       }
     }

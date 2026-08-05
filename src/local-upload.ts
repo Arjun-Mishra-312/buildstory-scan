@@ -10,7 +10,7 @@ import { canonicalJson, sha256 } from "./canonical-json.js";
 import { CONNECT_PROTOCOL_VERSION, MAX_SNAPSHOT_UPLOAD_BYTES } from "./connect.js";
 import { PROJECT_SNAPSHOT_SCHEMA_VERSION, type ProjectSnapshot } from "./contract.js";
 import { ScannerError } from "./errors.js";
-import { resolveLoopbackHttpUrl } from "./loopback-url.js";
+import { resolveTrustedApiUrl } from "./loopback-url.js";
 import { detectKnownSecrets, Redactor } from "./redaction.js";
 import { detectPrivateLocations } from "./privacy-boundary.js";
 import { validateProjectSnapshot } from "./validation.js";
@@ -146,7 +146,7 @@ async function readBoundedJson(response: Response, errorPrefix: string): Promise
 function resolveReadUrl(rawValue: unknown, uploadUrl: URL, required: boolean): URL | null {
   if (rawValue === null && !required) return null;
   if (typeof rawValue !== "string") return null;
-  const parsed = resolveLoopbackHttpUrl(rawValue, uploadUrl);
+  const parsed = resolveTrustedApiUrl(rawValue, uploadUrl);
   if (!parsed || parsed.origin !== uploadUrl.origin) return null;
   return parsed;
 }
@@ -231,9 +231,9 @@ export async function uploadProjectSnapshot(
   if (payload.bytes.byteLength > grant.maxBytes) {
     throw new ScannerError("SNAPSHOT_TOO_LARGE_FOR_GRANT", "The validated snapshot exceeds the claimed grant's byte limit; nothing was sent. Connect again after reducing the scan window.");
   }
-  const uploadUrl = resolveLoopbackHttpUrl(grant.snapshotEndpoint);
+  const uploadUrl = resolveTrustedApiUrl(grant.snapshotEndpoint);
   if (!uploadUrl) {
-    throw new ScannerError("UPLOAD_ENDPOINT_INVALID", "The claimed snapshot endpoint is not loopback. Nothing was sent; run connect again.");
+    throw new ScannerError("UPLOAD_ENDPOINT_INVALID", "The claimed snapshot endpoint is unsafe. Nothing was sent; run connect again.");
   }
 
   const timeoutMilliseconds = validateTimeout(options.timeoutMilliseconds);
@@ -347,7 +347,7 @@ async function authenticatedGet(
   options: UploadProjectSnapshotOptions,
   errorPrefix: string,
 ): Promise<unknown> {
-  const url = resolveLoopbackHttpUrl(urlValue);
+  const url = resolveTrustedApiUrl(urlValue);
   if (!url) throw new ScannerError(`${errorPrefix}_ENDPOINT_INVALID`, "The stored local dashboard endpoint is unsafe. Run connect again.");
   const response = await fetchWithTimeout(
     options.fetchImplementation ?? globalThis.fetch,
@@ -361,7 +361,7 @@ async function authenticatedGet(
     },
     validateTimeout(options.timeoutMilliseconds),
     `${errorPrefix}_UNAVAILABLE`,
-    "The local dashboard is unavailable. Start it on the same loopback address and run status again.",
+    "The dashboard is unavailable. Verify it is reachable at the connected API base and run status again.",
   );
   if (!response.ok) {
     await response.body?.cancel().catch(() => undefined);

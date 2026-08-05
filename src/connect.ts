@@ -1,7 +1,7 @@
 import { storeUploadGrant, type StoredUploadGrant } from "./connection-state.js";
 import { PROJECT_SNAPSHOT_SCHEMA_VERSION, SCANNER_VERSION } from "./contract.js";
 import { ScannerError } from "./errors.js";
-import { normalizeLoopbackApiBase, resolveLoopbackHttpUrl } from "./loopback-url.js";
+import { isLoopbackHostname, normalizeApiBase, resolveTrustedApiUrl } from "./loopback-url.js";
 
 export const CONNECT_PROTOCOL_VERSION = "1.0" as const;
 export const MOCK_API_BASE_URL = "mock://local" as const;
@@ -17,6 +17,13 @@ export interface ConnectOptions {
   uploadSessionId: string;
   deviceCode: string;
   apiBaseUrl?: string;
+  /**
+   * Required whenever apiBaseUrl resolves to a non-loopback host. The user
+   * must state the exact hostname they intend to trust as a second,
+   * separate argument - copying a malicious --api-base-url alone is not
+   * enough to send the bearer grant anywhere.
+   */
+  allowHost?: string;
   timeoutMilliseconds?: number;
   fetchImplementation?: FetchImplementation;
   stateDirectory?: string;
@@ -75,7 +82,10 @@ function validateCredential(label: string, value: string, pattern: RegExp): void
   }
 }
 
-export function parseConnectEndpoint(rawValue: string | undefined): ParsedMockEndpoint | ParsedLocalEndpoint {
+export function parseConnectEndpoint(
+  rawValue: string | undefined,
+  allowHost?: string,
+): ParsedMockEndpoint | ParsedLocalEndpoint {
   const value = rawValue?.trim();
   if (!value) {
     throw new ScannerError(
@@ -86,13 +96,30 @@ export function parseConnectEndpoint(rawValue: string | undefined): ParsedMockEn
   }
   if (value === MOCK_API_BASE_URL || value === `${MOCK_API_BASE_URL}/`) return { mode: "mock" };
 
-  const baseUrl = normalizeLoopbackApiBase(value);
+  const baseUrl = normalizeApiBase(value);
   if (!baseUrl) {
     throw new ScannerError(
       "CONNECT_ENDPOINT_NOT_LOCAL",
-      "Only mock://local or an explicit loopback HTTP(S) API base URL is allowed; remote hosts, URL credentials, query strings, and fragments are refused.",
+      "Only mock://local, a loopback HTTP(S) API base URL, or an explicit HTTPS host paired with --allow-host is allowed; URL credentials, query strings, and fragments are refused.",
       2,
     );
+  }
+  if (!isLoopbackHostname(baseUrl.hostname)) {
+    const trimmedAllowHost = allowHost?.trim().toLocaleLowerCase("en-US");
+    if (!trimmedAllowHost) {
+      throw new ScannerError(
+        "CONNECT_ALLOW_HOST_REQUIRED",
+        "A non-loopback --api-base-url requires --allow-host matching its exact hostname. This is a deliberate second confirmation - it is not inferred from --api-base-url.",
+        2,
+      );
+    }
+    if (trimmedAllowHost !== baseUrl.hostname.toLocaleLowerCase("en-US")) {
+      throw new ScannerError(
+        "CONNECT_ALLOW_HOST_MISMATCH",
+        "--allow-host does not match the --api-base-url hostname. Nothing was sent.",
+        2,
+      );
+    }
   }
   return {
     mode: "local-api",
@@ -126,7 +153,7 @@ function validateConnectionResponse(
   const grant = value.uploadGrant;
   const expiresAt = typeof grant.expiresAt === "string" ? new Date(grant.expiresAt) : new Date(Number.NaN);
   const endpointUrl = typeof grant.snapshotEndpoint === "string"
-    ? resolveLoopbackHttpUrl(grant.snapshotEndpoint, endpoint.baseUrl)
+    ? resolveTrustedApiUrl(grant.snapshotEndpoint, endpoint.baseUrl)
     : null;
   if (!hasExactKeys(grant, ["bearerToken", "snapshotEndpoint", "expiresAt", "schemaVersion", "maxBytes"])
     || typeof grant.bearerToken !== "string"
@@ -144,7 +171,7 @@ function validateConnectionResponse(
     || (grant.maxBytes as number) > MAX_SNAPSHOT_UPLOAD_BYTES) {
     throw new ScannerError(
       "CONNECT_GRANT_INVALID",
-      "The local API returned an invalid upload grant. It must be one-use, short-lived, schema-compatible, byte-bounded, and same-origin loopback.",
+      "The local API returned an invalid upload grant. It must be one-use, short-lived, schema-compatible, byte-bounded, and same-origin as the connected API base.",
     );
   }
 
@@ -162,7 +189,7 @@ function validateConnectionResponse(
 function timeoutError(timeoutMilliseconds: number): ScannerError {
   return new ScannerError(
     "CONNECT_TIMEOUT",
-    `The local web app did not respond within ${timeoutMilliseconds} milliseconds. Start it and verify the loopback port.`,
+    `The API did not respond within ${timeoutMilliseconds} milliseconds. Verify --api-base-url and that the service is reachable.`,
   );
 }
 
@@ -188,7 +215,7 @@ async function readBoundedResponse(response: Response): Promise<string> {
 export async function connectBuildStory(options: ConnectOptions): Promise<ConnectionReceipt> {
   validateCredential("The upload session ID", options.uploadSessionId, /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/);
   validateCredential("The device code", options.deviceCode, /^[A-Za-z0-9][A-Za-z0-9._~-]{2,127}$/);
-  const endpoint = parseConnectEndpoint(options.apiBaseUrl);
+  const endpoint = parseConnectEndpoint(options.apiBaseUrl, options.allowHost);
   if (endpoint.mode === "mock") {
     return {
       connected: true,

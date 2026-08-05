@@ -51,6 +51,37 @@ test("CLI connect without endpoint gives an actionable setup error", async () =>
   assert.equal(result.stderr.includes("session-demo-001"), false);
 });
 
+test("CLI --remote conflicts with an explicit --api-base-url or --allow-host", async () => {
+  const withApiBaseUrl = await runProcess([
+    "connect", "session-demo-remote",
+    "--code", "DEVICE-CODE-REMOTE",
+    "--remote",
+    "--api-base-url", "https://staging.example.invalid/",
+  ]);
+  assert.equal(withApiBaseUrl.exitCode, 2);
+  assert.match(withApiBaseUrl.stderr, /CONNECT_REMOTE_CONFLICT/);
+
+  const withAllowHost = await runProcess([
+    "connect", "session-demo-remote",
+    "--code", "DEVICE-CODE-REMOTE",
+    "--remote",
+    "--allow-host", "staging.example.invalid",
+  ]);
+  assert.equal(withAllowHost.exitCode, 2);
+  assert.match(withAllowHost.stderr, /CONNECT_REMOTE_CONFLICT/);
+});
+
+test("CLI connect requires --allow-host for a non-loopback --api-base-url", async () => {
+  const result = await runProcess([
+    "connect", "session-demo-remote",
+    "--code", "DEVICE-CODE-REMOTE",
+    "--api-base-url", "https://api.example.invalid/",
+  ]);
+  assert.equal(result.exitCode, 2);
+  assert.match(result.stderr, /CONNECT_ALLOW_HOST_REQUIRED/);
+  assert.match(result.stderr, /--allow-host/);
+});
+
 test("CLI connect performs only the documented handshake and stores a bounded grant", async () => {
   const fixture = await createLocalFixture();
   let capturedRequest: Record<string, unknown> | null = null;

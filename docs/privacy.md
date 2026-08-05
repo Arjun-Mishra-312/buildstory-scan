@@ -19,7 +19,7 @@
 
 `inspect` and `scan` never call the network. `inspect` does not read Codex roots. `scan` will not read them until the exact `--consent local-scan` is present.
 
-`connect` is a separate control plane. Mock mode contacts nothing. Real mode contacts only an explicit loopback API and sends the bounded request in [`connect-protocol.md`](connect-protocol.md). It does not read a repository or snapshot. The upload-session ID and device code are kept only in process memory and the POST body, never printed, logged, hashed, or persisted. Because `--code` can remain in PowerShell history or privileged process listings, dashboard codes must be short-lived and one-use.
+`connect` is a separate control plane. Mock mode contacts nothing. Real mode contacts only an explicit loopback API, or one explicit HTTPS host confirmed via `--allow-host`/`--remote`, and sends the bounded request in [`connect-protocol.md`](connect-protocol.md). It does not read a repository or snapshot. The upload-session ID and device code are kept only in process memory and the POST body, never printed, logged, hashed, or persisted. Because `--code` can remain in PowerShell history or privileged process listings, dashboard codes must be short-lived and one-use.
 
 `scan-upload` is the only data plane. It requires both local-scan and local-dashboard upload consent, then sends only the already validated canonical `ProjectSnapshot`. No raw input, adapter object, repository path, environment dump, error detail, cookie, multipart attachment, or wrapper object can reach the transport API.
 

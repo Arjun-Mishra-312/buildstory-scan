@@ -1,5 +1,6 @@
 import type { RedactionCategory, RedactionSummary } from "./contract.js";
 import { compareStrings } from "./canonical-json.js";
+import { replacePrivateLocations } from "./privacy-boundary.js";
 
 interface RedactionRule {
   category: RedactionCategory;
@@ -99,6 +100,9 @@ export class Redactor {
   private truncated = 0;
   private transcriptBodiesDiscarded = 0;
   private toolPayloadsDiscarded = 0;
+  private excerptsScanned = 0;
+  private excerptsDropped = 0;
+  private excerptLocationReplacements = 0;
 
   public cleanMetadata(input: string, maxLength = 160): string {
     this.scanned += 1;
@@ -129,12 +133,68 @@ export class Redactor {
     return output || "unknown";
   }
 
+  /**
+   * Redacts free conversation text for the opt-in narrative-evidence path.
+   * Unlike cleanMetadata (scanner-generated fields that should never
+   * contain a path/URL/host - the final fail-closed check aborts the scan
+   * if they do), this REPLACES locations rather than treating their
+   * presence as fatal, since excerpted conversation mentioning a file path
+   * is normal. Returns null if a known-secret pattern matched even after
+   * replacement was attempted, signaling the caller to drop this excerpt
+   * entirely rather than transmit a partially-redacted secret.
+   */
+  public cleanExcerpt(input: string, maxLength: number): string | null {
+    this.excerptsScanned += 1;
+    const scanLimit = Math.max(maxLength * 4, 4_096);
+    let output = input.length > scanLimit ? input.slice(0, scanLimit) : input;
+    output = output.normalize("NFC");
+
+    let containedKnownSecret = false;
+    for (const rule of RULES) {
+      output = output.replace(rule.pattern, (match) => {
+        const replacement = rule.replacement?.(match) ?? placeholder(rule.category);
+        if (replacement !== match) {
+          this.increment(rule.category);
+          if (rule.knownSecret) containedKnownSecret = true;
+        }
+        return replacement;
+      });
+    }
+    if (containedKnownSecret) {
+      this.excerptsDropped += 1;
+      return null;
+    }
+
+    const located = replacePrivateLocations(output);
+    output = located.value;
+    if (located.findings.length > 0) this.excerptLocationReplacements += located.findings.length;
+
+    output = output.replace(CONTROL_CHARACTERS, () => {
+      this.increment("control-character");
+      return "";
+    });
+
+    output = output.trim();
+    if (output.length > maxLength) {
+      output = `${output.slice(0, Math.max(0, maxLength - 1))}…`;
+    }
+    return output || null;
+  }
+
   public recordTranscriptBodyDiscarded(count = 1): void {
     this.transcriptBodiesDiscarded += count;
   }
 
   public recordToolPayloadDiscarded(count = 1): void {
     this.toolPayloadsDiscarded += count;
+  }
+
+  public excerptStats(): { scanned: number; dropped: number; locationReplacements: number } {
+    return {
+      scanned: this.excerptsScanned,
+      dropped: this.excerptsDropped,
+      locationReplacements: this.excerptLocationReplacements,
+    };
   }
 
   public summary(finalLeakCheckPassed: true): RedactionSummary {

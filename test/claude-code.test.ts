@@ -109,3 +109,54 @@ test("scanning both providers together produces sorted, attributable sessions", 
     await fixture.cleanup();
   }
 });
+
+test("narrativeEvidence is absent by default and opt-in produces real, redacted excerpts", async () => {
+  const fixture = await createLocalFixture();
+  try {
+    const withoutEvidence = await buildProjectSnapshot({
+      repositoryPath: fixture.repository,
+      consent: "local-scan",
+      providers: ["claude-code"],
+      claudeCodeHome: fixture.claudeCodeHome,
+      since: "2026-08-03T00:00:00Z",
+      until: "2026-08-04T00:00:00Z",
+    });
+    assert.equal(withoutEvidence.narrativeEvidence, undefined);
+    assert.equal(canonicalJson(withoutEvidence).includes("narrativeEvidence"), false);
+
+    const withEvidence = await buildProjectSnapshot({
+      repositoryPath: fixture.repository,
+      consent: "local-scan",
+      providers: ["claude-code"],
+      claudeCodeHome: fixture.claudeCodeHome,
+      since: "2026-08-03T00:00:00Z",
+      until: "2026-08-04T00:00:00Z",
+      narrativeEvidence: {},
+    });
+    validateProjectSnapshot(withEvidence);
+    const bundle = withEvidence.narrativeEvidence;
+    assert.ok(bundle);
+    assert.equal(bundle.bundleVersion, "1.0.0");
+    assert.equal(bundle.consent.mode, "explicit-cli-review");
+
+    // The fixture's first user turn (plan mode) and its second/last turn
+    // (mode changed to default, which is also the session's last message -
+    // deduplicated to one excerpt, not counted under both plan-transition
+    // and outcome).
+    const roles = bundle.excerpts.map((excerpt) => excerpt.role).sort();
+    assert.deepEqual(roles, ["plan-transition", "user-intent"]);
+    assert.ok(bundle.excerpts.every((excerpt) => excerpt.sessionRef === withEvidence.sessions[0]?.sessionRef));
+    assert.ok(bundle.excerpts.some((excerpt) => excerpt.text === "synthetic user turn one"));
+    assert.ok(bundle.excerpts.some((excerpt) => excerpt.text === "synthetic user turn two"));
+
+    // Every excerpt text is real, redacted conversation content - this is
+    // the one field allowed to carry it - but never the discarded tool
+    // payload/transcript placeholders from the fixture's other records.
+    const serialized = canonicalJson(withEvidence);
+    assert.equal(serialized.includes("synthetic transcript body"), false);
+    assert.equal(serialized.includes("synthetic tool payload"), false);
+    assert.equal(serialized.includes(fixture.repository), false);
+  } finally {
+    await fixture.cleanup();
+  }
+});

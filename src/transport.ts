@@ -38,7 +38,12 @@ export type UploadLifecycleState =
   | "status-readable"
   | "failed";
 
-/** HTTP is implemented only for loopback URLs; no remote transport exists. */
+/**
+ * HTTP is implemented for loopback URLs (local development) and for a
+ * single explicitly pinned HTTPS remote host per connection (--allow-host,
+ * or --remote for the default hosted origin) - never an arbitrary or
+ * unconfirmed remote host.
+ */
 export const LOOPBACK_SNAPSHOT_UPLOAD_IMPLEMENTED = true as const;
-export const REMOTE_SNAPSHOT_UPLOAD_IMPLEMENTED = false as const;
+export const REMOTE_SNAPSHOT_UPLOAD_IMPLEMENTED = true as const;
 export const NETWORK_UPLOAD_IMPLEMENTED = true as const;

@@ -1,6 +1,7 @@
 import type {
   EvidenceReference,
   Milestone,
+  NarrativeEvidenceBundle,
   ProjectSnapshot,
   ProviderId,
   QualityWarning,
@@ -10,6 +11,8 @@ import type {
 } from "./contract.js";
 import {
   CONSENT_STATEMENT_VERSION,
+  NARRATIVE_EVIDENCE_BUNDLE_VERSION,
+  NARRATIVE_EVIDENCE_CONSENT_VERSION,
   PROJECT_SNAPSHOT_SCHEMA_VERSION,
   SCANNER_NAME,
   SCANNER_VERSION,
@@ -28,6 +31,10 @@ const DEFAULT_LOOKBACK_MILLISECONDS = 30 * 24 * 60 * 60 * 1_000;
 const UNIX_EPOCH = "1970-01-01T00:00:00.000Z";
 const KNOWN_PROVIDERS: ReadonlySet<ProviderId> = new Set(["codex", "claude-code"]);
 
+const DEFAULT_MAX_EXCERPTS = 40;
+const DEFAULT_MAX_CHARS_PER_EXCERPT = 600;
+const DEFAULT_MAX_TOTAL_EXCERPT_CHARS = 20_000;
+
 export interface ScanOptions {
   repositoryPath: string;
   consent: "local-scan";
@@ -38,6 +45,16 @@ export interface ScanOptions {
   codexHome?: string;
   claudeCodeHome?: string;
   adapters?: SessionProviderAdapter[];
+  /**
+   * Opt-in narrative-evidence excerpt extraction. Requires its own
+   * separately-consented flow (CLI --with-evidence plus a typed --review
+   * confirmation) - never enabled implicitly by a plain scan.
+   */
+  narrativeEvidence?: {
+    maxExcerpts?: number;
+    maxCharsPerExcerpt?: number;
+    maxTotalChars?: number;
+  };
 }
 
 export interface RepositoryInspectReport {
@@ -355,6 +372,46 @@ export async function buildProjectSnapshot(options: ScanOptions): Promise<Projec
   const allWarnings = deduplicateWarnings([...discoveryWarnings, ...gitResult.warnings], includedSessionRefs);
   const sourceFilesSkipped = discoveries.reduce((sum, result) => sum + result.filesSkipped, 0);
 
+  let narrativeEvidence: NarrativeEvidenceBundle | undefined;
+  if (options.narrativeEvidence) {
+    const budget = {
+      maxExcerpts: options.narrativeEvidence.maxExcerpts ?? DEFAULT_MAX_EXCERPTS,
+      maxCharsPerExcerpt: options.narrativeEvidence.maxCharsPerExcerpt ?? DEFAULT_MAX_CHARS_PER_EXCERPT,
+      maxTotalChars: options.narrativeEvidence.maxTotalChars ?? DEFAULT_MAX_TOTAL_EXCERPT_CHARS,
+    };
+    const excerptResults = await Promise.all(
+      adapters
+        .filter((adapter) => adapter.extractExcerpts)
+        .map((adapter) =>
+          adapter.extractExcerpts!(
+            includedSessions.filter((session) => session.summary.provider === adapter.provider),
+            redactor,
+            budget,
+          ),
+        ),
+    );
+    const excerpts = excerptResults
+      .flatMap((result) => result.excerpts)
+      .slice(0, budget.maxExcerpts)
+      .sort((left, right) => compareStrings(left.excerptId, right.excerptId));
+    narrativeEvidence = {
+      bundleVersion: NARRATIVE_EVIDENCE_BUNDLE_VERSION,
+      generatedAt: timeWindow.end,
+      policy: { ...budget, excerptSelection: "deterministic-heuristic-v1" },
+      consent: {
+        mode: "explicit-cli-review",
+        statementVersion: NARRATIVE_EVIDENCE_CONSENT_VERSION,
+        approvedActions: ["send-redacted-excerpts-to-configured-cloud-model"],
+      },
+      excerpts,
+      discarded: {
+        candidates: excerptResults.reduce((sum, result) => sum + result.candidates, 0),
+        rejectedByRedaction: excerptResults.reduce((sum, result) => sum + result.rejectedByRedaction, 0),
+        rejectedByBudget: excerptResults.reduce((sum, result) => sum + result.rejectedByBudget, 0),
+      },
+    };
+  }
+
   const redaction = redactor.summary(true);
   const snapshotWithoutId: Omit<ProjectSnapshot, "scanId"> = {
     schemaVersion: PROJECT_SNAPSHOT_SCHEMA_VERSION,
@@ -410,6 +467,7 @@ export async function buildProjectSnapshot(options: ScanOptions): Promise<Projec
       warnings: allWarnings,
       assumptions: assumptionsForProviders(providerIds),
     },
+    ...(narrativeEvidence ? { narrativeEvidence } : {}),
   };
 
   const scanId = `scan_${shortHash(canonicalJson(snapshotWithoutId), 24)}` as const;
@@ -421,6 +479,12 @@ export async function buildProjectSnapshot(options: ScanOptions): Promise<Projec
       "The fail-closed output check found a possible secret. No snapshot was emitted.",
     );
   }
+  // Runs over narrativeEvidence.excerpts[].text too. Excerpts are
+  // redacted by replacement (see Redactor.cleanExcerpt), not abort - but a
+  // pattern this check still catches after that pass means the
+  // replacement missed something, and the correct response is to fail the
+  // whole snapshot closed, the same as every other field, not to carve out
+  // a special case for excerpts here.
   if (detectPrivateLocations(snapshot).length > 0) {
     throw new ScannerError(
       "FINAL_LOCATION_CHECK_FAILED",

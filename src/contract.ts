@@ -1,9 +1,12 @@
 /** Portable TypeScript mirror of schema/project-snapshot.schema.json. */
 
-export const PROJECT_SNAPSHOT_SCHEMA_VERSION = "1.1.0" as const;
+export const PROJECT_SNAPSHOT_SCHEMA_VERSION = "1.2.0" as const;
 export const SCANNER_NAME = "buildstory" as const;
 export const SCANNER_VERSION = "0.3.0" as const;
 export const CONSENT_STATEMENT_VERSION = "1.0" as const;
+/** Separate, additional consent for the opt-in narrativeEvidence bundle only. */
+export const NARRATIVE_EVIDENCE_CONSENT_VERSION = "1.0" as const;
+export const NARRATIVE_EVIDENCE_BUNDLE_VERSION = "1.0.0" as const;
 
 export type IsoDateTime = string;
 export type Sha256Digest = `sha256:${string}`;
@@ -28,6 +31,53 @@ export interface ProjectSnapshot {
   redaction: RedactionSummary;
   provenance: Provenance;
   quality: QualitySummary;
+  /**
+   * Opt-in only: present exclusively when the creator explicitly ran the
+   * excerpts flow, reviewed the exact bundle, and typed the confirmation.
+   * Absent from every default scan. This is the ONLY field on
+   * ProjectSnapshot that may contain excerpted session text; every other
+   * field remains permanently content-free.
+   */
+  narrativeEvidence?: NarrativeEvidenceBundle;
+}
+
+export type NarrativeExcerptRole =
+  | "session-title"
+  | "user-intent"
+  | "plan-transition"
+  | "assistant-decision"
+  | "outcome";
+
+export interface NarrativeExcerpt {
+  excerptId: string;
+  sessionRef: string;
+  occurredAt: IsoDateTime;
+  role: NarrativeExcerptRole;
+  /** Redacted (paths/URLs/hosts replaced), truncated, control-character-free. */
+  text: string;
+}
+
+export interface NarrativeEvidenceBundle {
+  bundleVersion: typeof NARRATIVE_EVIDENCE_BUNDLE_VERSION;
+  generatedAt: IsoDateTime;
+  policy: {
+    maxExcerpts: number;
+    maxCharsPerExcerpt: number;
+    maxTotalChars: number;
+    excerptSelection: "deterministic-heuristic-v1";
+  };
+  /** Separate from sourceSelection.consent; specifically authorizes this bundle's transmission. */
+  consent: {
+    mode: "explicit-cli-review";
+    statementVersion: typeof NARRATIVE_EVIDENCE_CONSENT_VERSION;
+    approvedActions: ["send-redacted-excerpts-to-configured-cloud-model"];
+  };
+  excerpts: NarrativeExcerpt[];
+  discarded: {
+    candidates: number;
+    rejectedByRedaction: number;
+    rejectedByBudget: number;
+  };
 }
 
 export interface SourceSelection {
