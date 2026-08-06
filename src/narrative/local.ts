@@ -2,7 +2,7 @@ import type { GeneratedNarrativeSections, ProjectSnapshot, ReportStoryPackV2 } f
 import { defaultProfileNarrative, type BuilderProfile } from "../insights/profile.js";
 import type { Redactor } from "../redaction.js";
 import type { ScanProgressReporter } from "../progress.js";
-import { createDefaultStoryPack, sanitizeStoryPack, sectionsFromStoryPack } from "./story-pack.js";
+import { createDefaultStoryPack, sanitizeStoryPack, sectionsFromStoryPack, validateStoryPackComponent } from "./story-pack.js";
 
 export type LocalNarrativeInput = {
   snapshot: Omit<ProjectSnapshot, "scanId" | "generatedNarrative" | "narrativeEvidence">;
@@ -148,13 +148,18 @@ function unknownSourceRefs(value: unknown, allowed: Set<string>): string[] {
   return [...new Set(found)].slice(0, 8);
 }
 
-async function callOllamaWithRepair(url: URL, model: string, prompt: string, timeoutMs: number, allowedRefs: Set<string>): Promise<unknown> {
+async function callOllamaWithRepair(url: URL, model: string, prompt: string, timeoutMs: number, allowedRefs: Set<string>, component: "story" | "insights"): Promise<unknown> {
   let currentPrompt = prompt;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const value = await callOllama(url, model, currentPrompt, timeoutMs);
     const invalid = unknownSourceRefs(value, allowedRefs);
-    if (!invalid.length || attempt === 1) return value;
-    currentPrompt = `${prompt}\nValidation feedback: sourceRefs ${invalid.join(", ")} are unknown. Retry using only the provided source references.`;
+    const validation = validateStoryPackComponent(value, component, allowedRefs);
+    if ((!invalid.length && validation.ok) || attempt === 1) return value;
+    const feedback = [
+      invalid.length ? `unknown sourceRefs: ${invalid.join(", ")}` : "",
+      validation.errors.length ? `schema issues: ${validation.errors.slice(0, 8).join("; ")}` : "",
+    ].filter(Boolean).join(". ");
+    currentPrompt = `${prompt}\nValidation feedback: ${feedback}. Retry with one JSON object matching the requested component schema and only the provided source references.`;
   }
   return {};
 }
@@ -233,7 +238,7 @@ export function createOllamaNarrativeGenerator(requestedModel?: string | null): 
     let narrativeValue: unknown = {};
     let profileValue: unknown = {};
     try {
-      narrativeValue = await callOllamaWithRepair(url, model, narrativePrompt, timeoutMs, sourceRefSet);
+      narrativeValue = await callOllamaWithRepair(url, model, narrativePrompt, timeoutMs, sourceRefSet, "story");
       input.onProgress?.({ stage: "generating-story", state: "complete", model, message: "Story components generated (1/2)." });
     } catch (error) {
       if (error instanceof LocalNarrativeGenerationError && error.code === "ollama_unavailable") throw error;
@@ -241,7 +246,7 @@ export function createOllamaNarrativeGenerator(requestedModel?: string | null): 
     }
     input.onProgress?.({ stage: "generating-insights", state: "start", model, message: "Generating insight components (2/2)." });
     try {
-      profileValue = await callOllamaWithRepair(url, model, profilePrompt, timeoutMs, sourceRefSet);
+      profileValue = await callOllamaWithRepair(url, model, profilePrompt, timeoutMs, sourceRefSet, "insights");
       input.onProgress?.({ stage: "generating-insights", state: "complete", model, message: "Insight components generated (2/2)." });
     } catch (error) {
       if (error instanceof LocalNarrativeGenerationError && error.code === "ollama_unavailable") throw error;

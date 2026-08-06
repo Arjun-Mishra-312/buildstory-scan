@@ -656,7 +656,8 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
   validateScannerArguments(parsed);
   if (parsed.command === "inspect") {
     const report = await inspectSelectedRepository(parsed.repo);
-    if (!parsed.quiet) process.stdout.write(canonicalJson(report));
+    // `--quiet` controls progress, never machine-readable command data.
+    process.stdout.write(canonicalJson(report));
     return 0;
   }
 

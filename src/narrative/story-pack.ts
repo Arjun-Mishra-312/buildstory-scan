@@ -27,6 +27,112 @@ function refs(value: unknown, allowed: Set<string>): string[] {
   return [...new Set(value.filter((item): item is string => typeof item === "string" && allowed.has(item)))].slice(0, 4);
 }
 
+export type StoryPackComponent = "story" | "insights";
+
+export type StoryPackValidation = { ok: boolean; errors: string[] };
+
+function objectValue(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function stringIssue(value: unknown, path: string, min: number, max: number): string | null {
+  if (typeof value !== "string") return `${path} must be a string.`;
+  const length = value.trim().length;
+  if (length < min) return `${path} must contain at least ${min} character${min === 1 ? "" : "s"}.`;
+  if (length > max) return `${path} must contain at most ${max} characters.`;
+  return null;
+}
+
+function listIssues(value: unknown, path: string, min: number, max: number): string[] {
+  if (!Array.isArray(value)) return [`${path} must be an array.`];
+  return [
+    ...(value.length < min ? [`${path} must contain at least ${min} items.`] : []),
+    ...(value.length > max ? [`${path} must contain at most ${max} items.`] : []),
+  ];
+}
+
+function refIssues(value: unknown, path: string, allowed: Set<string>): string[] {
+  if (!Array.isArray(value)) return [`${path} must be an array.`];
+  const errors: string[] = [];
+  if (allowed.size > 0 && value.length < 1) errors.push(`${path} must contain at least one source reference.`);
+  if (value.length > 4) errors.push(`${path} must contain at most four source references.`);
+  const seen = new Set<string>();
+  value.forEach((item, index) => {
+    if (typeof item !== "string" || !item.trim()) errors.push(`${path}[${index}] must be a non-empty string.`);
+    else if (!allowed.has(item)) errors.push(`${path}[${index}] references unknown source ${item}.`);
+    else if (seen.has(item)) errors.push(`${path}[${index}] duplicates source ${item}.`);
+    else seen.add(item);
+  });
+  return errors;
+}
+
+export function validateStoryPackComponent(value: unknown, component: StoryPackComponent, allowedRefs: Set<string>): StoryPackValidation {
+  const candidate = objectValue(value);
+  if (!candidate) return { ok: false, errors: ["response must be a JSON object."] };
+  // Older local models may still answer with the flat V1 keys. The caller
+  // normalizes that compatibility shape into V2 and records any replacements.
+  if (component === "story" && !candidate.hero && ("headline" in candidate || "narrative" in candidate || typeof candidate.turningPoint === "string")) return { ok: true, errors: [] };
+  if (component === "insights" && !candidate.decisions && ("decisionPatterns" in candidate || "standoutTraits" in candidate || typeof candidate.growthEdge === "string")) return { ok: true, errors: [] };
+  const errors: string[] = [];
+  if (component === "story") {
+    const hero = objectValue(candidate.hero);
+    if (!hero) errors.push("hero must be an object.");
+    else {
+      const headline = stringIssue(hero.headline, "hero.headline", 1, LIMITS.headline); if (headline) errors.push(headline);
+      const summary = stringIssue(hero.summary, "hero.summary", 1, LIMITS.summary); if (summary) errors.push(summary);
+    }
+    errors.push(...listIssues(candidate.buildArc, "buildArc", 3, 3));
+    if (Array.isArray(candidate.buildArc)) {
+      const phases = candidate.buildArc.map((entry) => objectValue(entry)?.phase);
+      if (new Set(phases).size !== 3 || !(["discover", "decide", "deliver"] as const).every((phase) => phases.includes(phase))) errors.push("buildArc must contain exactly one discover, decide, and deliver phase.");
+      candidate.buildArc.forEach((entry, index) => {
+        const item = objectValue(entry); const path = `buildArc[${index}]`;
+        if (!item) { errors.push(`${path} must be an object.`); return; }
+        if (!["discover", "decide", "deliver"].includes(String(item.phase))) errors.push(`${path}.phase is unsupported.`);
+        const headline = stringIssue(item.headline, `${path}.headline`, 1, LIMITS.arcHeadline); if (headline) errors.push(headline);
+        const summary = stringIssue(item.summary, `${path}.summary`, 1, LIMITS.arcSummary); if (summary) errors.push(summary);
+        errors.push(...refIssues(item.sourceRefs, `${path}.sourceRefs`, allowedRefs));
+      });
+    }
+    errors.push(...listIssues(candidate.moments, "moments", 3, 5));
+    if (Array.isArray(candidate.moments)) candidate.moments.forEach((entry, index) => {
+      const item = objectValue(entry); const path = `moments[${index}]`;
+      if (!item) { errors.push(`${path} must be an object.`); return; }
+      if (!["discover", "decide", "deliver"].includes(String(item.phase))) errors.push(`${path}.phase is unsupported.`);
+      if (!["discovery", "decision", "breakthrough", "delivery"].includes(String(item.kind))) errors.push(`${path}.kind is unsupported.`);
+      for (const [key, max] of [["title", LIMITS.title], ["whatHappened", LIMITS.body], ["whyItMattered", LIMITS.body]] as const) { const issue = stringIssue(item[key], `${path}.${key}`, 1, max); if (issue) errors.push(issue); }
+      errors.push(...refIssues(item.sourceRefs, `${path}.sourceRefs`, allowedRefs));
+    });
+    const turning = objectValue(candidate.turningPoint);
+    if (!turning) errors.push("turningPoint must be an object.");
+    else { const quote = stringIssue(turning.quote, "turningPoint.quote", 1, LIMITS.shortBody); if (quote) errors.push(quote); errors.push(...refIssues(turning.sourceRefs, "turningPoint.sourceRefs", allowedRefs)); }
+  } else {
+    errors.push(...listIssues(candidate.decisions, "decisions", 2, 4));
+    if (Array.isArray(candidate.decisions)) candidate.decisions.forEach((entry, index) => {
+      const item = objectValue(entry); const path = `decisions[${index}]`;
+      if (!item) { errors.push(`${path} must be an object.`); return; }
+      for (const [key, max] of [["title", LIMITS.title], ["rationale", LIMITS.shortBody], ["outcome", LIMITS.shortBody]] as const) { const issue = stringIssue(item[key], `${path}.${key}`, 1, max); if (issue) errors.push(issue); }
+      errors.push(...refIssues(item.sourceRefs, `${path}.sourceRefs`, allowedRefs));
+    });
+    for (const name of ["learnings", "standoutTraits"] as const) {
+      errors.push(...listIssues(candidate[name], name, 2, 4));
+      if (Array.isArray(candidate[name])) candidate[name].forEach((entry, index) => {
+        const item = objectValue(entry); const path = `${name}[${index}]`;
+        if (!item) { errors.push(`${path} must be an object.`); return; }
+        const title = stringIssue(item.title, `${path}.title`, 1, LIMITS.title); if (title) errors.push(title);
+        const detail = stringIssue(item.detail, `${path}.detail`, 1, LIMITS.shortBody); if (detail) errors.push(detail);
+        errors.push(...refIssues(item.sourceRefs, `${path}.sourceRefs`, allowedRefs));
+      });
+    }
+    const growth = objectValue(candidate.growthEdge);
+    if (!growth) errors.push("growthEdge must be an object.");
+    else { for (const [key, max] of [["title", LIMITS.title], ["observation", LIMITS.body], ["nextStep", LIMITS.shortBody]] as const) { const issue = stringIssue(growth[key], `growthEdge.${key}`, 1, max); if (issue) errors.push(issue); } errors.push(...refIssues(growth.sourceRefs, "growthEdge.sourceRefs", allowedRefs)); }
+  }
+  return { ok: errors.length === 0, errors: errors.slice(0, 20) };
+}
+
 function sourceCatalog(snapshot: ProjectSnapshot): StoryPackSource[] {
   const evidenceBySession = new Map<string, string[]>();
   for (const evidence of snapshot.evidence) {
