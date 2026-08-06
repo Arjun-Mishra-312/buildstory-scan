@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://story-scanner.local/schemas/project-snapshot-1.2.0.json",
+  "$id": "https://story-scanner.local/schemas/project-snapshot-1.5.0.json",
   "title": "ProjectSnapshot",
   "description": "Privacy-preserving aggregate of repository and AI coding-session activity. Transcript bodies, tool payloads, paths, diffs, and source text are intentionally not representable.",
   "type": "object",
@@ -22,7 +22,7 @@
     "quality"
   ],
   "properties": {
-    "schemaVersion": { "const": "1.2.0" },
+    "schemaVersion": { "const": "1.5.0" },
     "scanId": { "type": "string", "pattern": "^scan_[a-f0-9]{24}$" },
     "generatedAt": { "$ref": "#/$defs/dateTime" },
     "sourceSelection": { "$ref": "#/$defs/sourceSelection" },
@@ -45,7 +45,8 @@
     "redaction": { "$ref": "#/$defs/redaction" },
     "provenance": { "$ref": "#/$defs/provenance" },
     "quality": { "$ref": "#/$defs/quality" },
-    "narrativeEvidence": { "$ref": "#/$defs/narrativeEvidence" }
+    "narrativeEvidence": { "$ref": "#/$defs/narrativeEvidence" },
+    "generatedNarrative": { "$ref": "#/$defs/generatedNarrative" }
   },
   "$defs": {
     "dateTime": {
@@ -74,13 +75,15 @@
             "additionalProperties": false,
             "required": ["provider", "selected", "repositoryScoped", "rootsConsidered", "filesDiscovered", "sessionsMatched", "sessionsIncluded"],
             "properties": {
-              "provider": { "enum": ["codex", "claude-code"] },
+              "provider": { "enum": ["codex", "claude-code", "gemini-antigravity", "cursor"] },
               "selected": { "const": true },
               "repositoryScoped": { "const": true },
               "rootsConsidered": { "$ref": "#/$defs/nonNegativeInteger" },
               "filesDiscovered": { "$ref": "#/$defs/nonNegativeInteger" },
               "sessionsMatched": { "$ref": "#/$defs/nonNegativeInteger" },
-              "sessionsIncluded": { "$ref": "#/$defs/nonNegativeInteger" }
+              "sessionsIncluded": { "$ref": "#/$defs/nonNegativeInteger" },
+              "warnings": { "$ref": "#/$defs/nonNegativeInteger" },
+              "diagnostic": { "enum": ["not-installed", "no-project-directory", "no-matching-sessions", "format-unsupported", "scope-unknown", "scanned"] }
             }
           }
         },
@@ -161,7 +164,8 @@
         "end": { "$ref": "#/$defs/dateTime" },
         "timezone": { "const": "UTC" },
         "startBasis": { "enum": ["explicit", "default-lookback", "empty-repository"] },
-        "endBasis": { "enum": ["explicit", "latest-session", "head-commit", "unix-epoch"] }
+        "endBasis": { "enum": ["explicit", "latest-session", "head-commit", "unix-epoch"] },
+        "utcOffsetMinutes": { "type": "integer", "minimum": -840, "maximum": 840 }
       }
     },
     "tokenUsage": {
@@ -186,7 +190,7 @@
       "required": ["sessionRef", "provider", "sourceKind", "startedAt", "endedAt", "status", "workingDirectoryRelation", "summary", "turns", "assistantMessages", "toolCalls", "modelRefs", "toolRefs", "tokenUsage"],
       "properties": {
         "sessionRef": { "type": "string", "pattern": "^ses_[a-f0-9]{20}$" },
-        "provider": { "enum": ["codex", "claude-code"] },
+        "provider": { "enum": ["codex", "claude-code", "gemini-antigravity", "cursor"] },
         "sourceKind": { "enum": ["active", "archived", "custom"] },
         "startedAt": { "$ref": "#/$defs/dateTime" },
         "endedAt": { "$ref": "#/$defs/dateTime" },
@@ -307,7 +311,7 @@
       "required": ["evidenceId", "source", "kind", "observedAt", "digest"],
       "properties": {
         "evidenceId": { "type": "string", "pattern": "^ev_[a-f0-9]{20}$" },
-        "source": { "enum": ["codex", "claude-code", "git"] },
+        "source": { "enum": ["codex", "claude-code", "gemini-antigravity", "cursor", "git"] },
         "kind": { "enum": ["session-boundary", "tool-activity", "git-aggregate"] },
         "observedAt": { "$ref": "#/$defs/dateTime" },
         "digest": { "$ref": "#/$defs/sha256" },
@@ -368,7 +372,7 @@
           "type": "array",
           "minItems": 1,
           "uniqueItems": true,
-          "items": { "enum": ["codex-jsonl", "claude-code-jsonl"] }
+          "items": { "enum": ["codex-jsonl", "claude-code-jsonl", "gemini-antigravity-jsonl", "cursor-sqlite"] }
         },
         "deterministicSerialization": { "const": "lexicographic-json" },
         "repositoryCommands": {
@@ -386,7 +390,7 @@
       "additionalProperties": false,
       "required": ["code", "severity", "message"],
       "properties": {
-        "code": { "enum": ["CODEX_ROOT_UNAVAILABLE", "CLAUDE_CODE_ROOT_UNAVAILABLE", "SESSION_FILE_LIMIT_REACHED", "SESSION_FILE_TOO_LARGE", "SESSION_LINE_TOO_LARGE", "SESSION_LINE_INVALID_JSON", "SESSION_MISSING_METADATA", "SESSION_TIMESTAMP_INVALID", "SESSION_MODEL_UNKNOWN", "SESSION_ACTIVE_AT_SCAN_END", "GIT_HISTORY_UNAVAILABLE", "GIT_STATUS_UNAVAILABLE", "NO_MATCHING_SESSIONS"] },
+        "code": { "enum": ["CODEX_ROOT_UNAVAILABLE", "CLAUDE_CODE_ROOT_UNAVAILABLE", "GEMINI_ANTIGRAVITY_ROOT_UNAVAILABLE", "CURSOR_ROOT_UNAVAILABLE", "PROVIDER_FORMAT_UNVERIFIED", "PROVIDER_SCOPE_UNKNOWN", "SESSION_FILE_LIMIT_REACHED", "SESSION_FILE_TOO_LARGE", "SESSION_LINE_TOO_LARGE", "SESSION_LINE_INVALID_JSON", "SESSION_MISSING_METADATA", "SESSION_TIMESTAMP_INVALID", "SESSION_MODEL_UNKNOWN", "SESSION_ACTIVE_AT_SCAN_END", "GIT_HISTORY_UNAVAILABLE", "GIT_STATUS_UNAVAILABLE", "NO_MATCHING_SESSIONS"] },
         "severity": { "enum": ["info", "warning"] },
         "message": { "type": "string", "minLength": 1, "maxLength": 300 },
         "sessionRef": { "type": "string", "pattern": "^ses_[a-f0-9]{20}$" }
@@ -406,6 +410,116 @@
         "assumptions": {
           "type": "array",
           "items": { "type": "string", "minLength": 1, "maxLength": 400 }
+        }
+      }
+    },
+    "generatedNarrative": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "generatedAt", "mode", "provider", "model", "sections", "fallbacksUsed"],
+      "properties": {
+        "version": { "enum": ["1.0.0", "2.0.0"] },
+        "generatedAt": { "$ref": "#/$defs/dateTime" },
+        "mode": { "const": "local" },
+        "provider": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "model": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "sections": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["headline", "narrative", "turningPoint", "learnings", "decisionPatterns", "standoutTraits", "growthEdge"],
+          "properties": {
+            "headline": { "type": "string", "minLength": 1, "maxLength": 160 },
+            "narrative": { "type": "string", "minLength": 1, "maxLength": 2000 },
+            "turningPoint": { "type": "string", "minLength": 1, "maxLength": 400 },
+            "learnings": { "type": "array", "minItems": 1, "maxItems": 5, "items": { "type": "string", "minLength": 1, "maxLength": 300 } },
+            "decisionPatterns": { "type": "array", "minItems": 1, "maxItems": 5, "items": { "type": "string", "minLength": 1, "maxLength": 300 } },
+            "standoutTraits": { "type": "array", "minItems": 1, "maxItems": 5, "items": { "type": "string", "minLength": 1, "maxLength": 300 } },
+            "growthEdge": { "type": "string", "minLength": 1, "maxLength": 500 }
+          }
+        },
+        "storyPack": { "$ref": "#/$defs/storyPack" },
+        "fallbacksUsed": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 80 } }
+      }
+    },
+    "storyPackSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ref", "provider", "occurredAt", "evidenceRefs", "metrics"],
+      "properties": {
+        "ref": { "type": "string", "pattern": "^(S[0-9]{2,}|GIT)$" },
+        "provider": { "enum": ["codex", "claude-code", "cursor", "gemini-antigravity", "git"] },
+        "sessionRef": { "type": "string", "pattern": "^ses_[a-f0-9]{20}$" },
+        "occurredAt": { "$ref": "#/$defs/dateTime" },
+        "evidenceRefs": { "type": "array", "items": { "type": "string", "pattern": "^ev_[a-f0-9]{20}$" } },
+        "excerptRef": { "type": "string", "pattern": "^exc_[a-f0-9]{20}$" },
+        "metrics": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["turns", "assistantMessages", "toolCalls"],
+          "properties": {
+            "turns": { "$ref": "#/$defs/nonNegativeInteger" },
+            "assistantMessages": { "$ref": "#/$defs/nonNegativeInteger" },
+            "toolCalls": { "$ref": "#/$defs/nonNegativeInteger" }
+          }
+        }
+      }
+    },
+    "storyPack": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "sources", "hero", "buildArc", "moments", "turningPoint", "decisions", "learnings", "standoutTraits", "growthEdge"],
+      "properties": {
+        "version": { "const": "2.0.0" },
+        "sources": { "type": "array", "items": { "$ref": "#/$defs/storyPackSource" } },
+        "hero": {
+          "type": "object", "additionalProperties": false, "required": ["headline", "summary"],
+          "properties": { "headline": { "type": "string", "minLength": 1, "maxLength": 120 }, "summary": { "type": "string", "minLength": 1, "maxLength": 480 } }
+        },
+        "buildArc": {
+          "type": "array", "minItems": 3, "maxItems": 3,
+          "items": {
+            "type": "object", "additionalProperties": false, "required": ["phase", "headline", "summary", "sourceRefs"],
+            "properties": {
+              "phase": { "enum": ["discover", "decide", "deliver"] },
+              "headline": { "type": "string", "minLength": 1, "maxLength": 100 },
+              "summary": { "type": "string", "minLength": 1, "maxLength": 260 },
+              "sourceRefs": { "type": "array", "items": { "type": "string", "pattern": "^(S[0-9]{2,}|GIT)$" } }
+            }
+          }
+        },
+        "moments": {
+          "type": "array", "minItems": 3, "maxItems": 5,
+          "items": {
+            "type": "object", "additionalProperties": false, "required": ["phase", "kind", "title", "whatHappened", "whyItMattered", "sourceRefs"],
+            "properties": {
+              "phase": { "enum": ["discover", "decide", "deliver"] },
+              "kind": { "enum": ["discovery", "decision", "breakthrough", "delivery"] },
+              "title": { "type": "string", "minLength": 1, "maxLength": 120 },
+              "whatHappened": { "type": "string", "minLength": 1, "maxLength": 400 },
+              "whyItMattered": { "type": "string", "minLength": 1, "maxLength": 400 },
+              "sourceRefs": { "type": "array", "items": { "type": "string", "pattern": "^(S[0-9]{2,}|GIT)$" } }
+            }
+          }
+        },
+        "turningPoint": {
+          "type": "object", "additionalProperties": false, "required": ["quote", "sourceRefs"],
+          "properties": { "quote": { "type": "string", "minLength": 1, "maxLength": 300 }, "sourceRefs": { "type": "array", "items": { "type": "string", "pattern": "^(S[0-9]{2,}|GIT)$" } } }
+        },
+        "decisions": {
+          "type": "array", "minItems": 2, "maxItems": 4,
+          "items": { "type": "object", "additionalProperties": false, "required": ["title", "rationale", "outcome", "sourceRefs"], "properties": { "title": { "type": "string", "minLength": 1, "maxLength": 120 }, "rationale": { "type": "string", "minLength": 1, "maxLength": 300 }, "outcome": { "type": "string", "minLength": 1, "maxLength": 300 }, "sourceRefs": { "type": "array", "items": { "type": "string", "pattern": "^(S[0-9]{2,}|GIT)$" } } } }
+        },
+        "learnings": {
+          "type": "array", "minItems": 2, "maxItems": 4,
+          "items": { "type": "object", "additionalProperties": false, "required": ["title", "detail", "sourceRefs"], "properties": { "title": { "type": "string", "minLength": 1, "maxLength": 120 }, "detail": { "type": "string", "minLength": 1, "maxLength": 300 }, "sourceRefs": { "type": "array", "items": { "type": "string", "pattern": "^(S[0-9]{2,}|GIT)$" } } } }
+        },
+        "standoutTraits": {
+          "type": "array", "minItems": 2, "maxItems": 4,
+          "items": { "type": "object", "additionalProperties": false, "required": ["title", "detail", "sourceRefs"], "properties": { "title": { "type": "string", "minLength": 1, "maxLength": 120 }, "detail": { "type": "string", "minLength": 1, "maxLength": 300 }, "sourceRefs": { "type": "array", "items": { "type": "string", "pattern": "^(S[0-9]{2,}|GIT)$" } } } }
+        },
+        "growthEdge": {
+          "type": "object", "additionalProperties": false, "required": ["title", "observation", "nextStep", "sourceRefs"],
+          "properties": { "title": { "type": "string", "minLength": 1, "maxLength": 120 }, "observation": { "type": "string", "minLength": 1, "maxLength": 400 }, "nextStep": { "type": "string", "minLength": 1, "maxLength": 300 }, "sourceRefs": { "type": "array", "items": { "type": "string", "pattern": "^(S[0-9]{2,}|GIT)$" } } }
         }
       }
     },
@@ -469,7 +583,8 @@
             "rejectedByRedaction": { "$ref": "#/$defs/nonNegativeInteger" },
             "rejectedByBudget": { "$ref": "#/$defs/nonNegativeInteger" }
           }
-        }
+        },
+        "emptyReason": { "enum": ["no-supported-provider-evidence", "no-candidates-in-window", "all-candidates-rejected"] }
       }
     }
   }

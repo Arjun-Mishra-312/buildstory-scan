@@ -310,7 +310,8 @@ test("CLI dry-run emits a valid payload and writes no snapshot", async () => {
       "--since", "2026-08-03T00:00:00Z",
       "--until", "2026-08-04T00:00:00Z",
       "--dry-run",
-    ]);
+      "--quiet",
+    ], { BUILDSTORY_OLLAMA_TIMEOUT_MS: "1000" });
     assert.equal(result.exitCode, 0, result.stderr);
     assert.equal(result.stderr, "");
     const snapshot: unknown = JSON.parse(result.stdout);
@@ -333,9 +334,9 @@ test("CLI output mode writes a validated snapshot outside the repository", async
       "--since", "2026-08-03T00:00:00Z",
       "--until", "2026-08-04T00:00:00Z",
       "--output", outputPath,
-    ]);
+    ], { BUILDSTORY_OLLAMA_TIMEOUT_MS: "1000" });
     assert.equal(result.exitCode, 0, result.stderr);
-    assert.equal(result.stderr, "");
+    assert.match(result.stderr, /Discovering providers/);
     assert.match(result.stdout, new RegExp(`Wrote ${PROJECT_SNAPSHOT_SCHEMA_VERSION.replaceAll(".", "\\.")} snapshot scan_`));
     const snapshot: unknown = JSON.parse(await readFile(outputPath, "utf8"));
     validateProjectSnapshot(snapshot);

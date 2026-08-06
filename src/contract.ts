@@ -1,8 +1,8 @@
 /** Portable TypeScript mirror of schema/project-snapshot.schema.json. */
 
-export const PROJECT_SNAPSHOT_SCHEMA_VERSION = "1.2.0" as const;
+export const PROJECT_SNAPSHOT_SCHEMA_VERSION = "1.5.0" as const;
 export const SCANNER_NAME = "buildstory" as const;
-export const SCANNER_VERSION = "0.3.0" as const;
+export const SCANNER_VERSION = "0.6.0" as const;
 export const CONSENT_STATEMENT_VERSION = "1.0" as const;
 /** Separate, additional consent for the opt-in narrativeEvidence bundle only. */
 export const NARRATIVE_EVIDENCE_CONSENT_VERSION = "1.0" as const;
@@ -10,11 +10,18 @@ export const NARRATIVE_EVIDENCE_BUNDLE_VERSION = "1.0.0" as const;
 
 export type IsoDateTime = string;
 export type Sha256Digest = `sha256:${string}`;
+export type NarrativeMode = "local" | "cloud" | "off";
 
-/** Every AI coding-session source this scanner can read. */
-export type ProviderId = "codex" | "claude-code";
+/**
+ * Every AI coding-session source this scanner can read. gemini-antigravity
+ * and cursor are best-effort adapters built from researched, unverified
+ * local formats (no real local install was available to confirm against) -
+ * see their ProviderDescriptor.formatVersions, which is always prefixed
+ * "unverified-" until a real fixture confirms the format.
+ */
+export type ProviderId = "codex" | "claude-code" | "gemini-antigravity" | "cursor";
 
-export type SessionFormat = "codex-jsonl" | "claude-code-jsonl";
+export type SessionFormat = "codex-jsonl" | "claude-code-jsonl" | "gemini-antigravity-jsonl" | "cursor-sqlite";
 
 export interface ProjectSnapshot {
   schemaVersion: typeof PROJECT_SNAPSHOT_SCHEMA_VERSION;
@@ -39,6 +46,8 @@ export interface ProjectSnapshot {
    * field remains permanently content-free.
    */
   narrativeEvidence?: NarrativeEvidenceBundle;
+  /** Local-only prose. Cloud narratives are generated server-side and never enter the upload. */
+  generatedNarrative?: GeneratedNarrative;
 }
 
 export type NarrativeExcerptRole =
@@ -56,6 +65,11 @@ export interface NarrativeExcerpt {
   /** Redacted (paths/URLs/hosts replaced), truncated, control-character-free. */
   text: string;
 }
+
+export type NarrativeEvidenceEmptyReason =
+  | "no-supported-provider-evidence"
+  | "no-candidates-in-window"
+  | "all-candidates-rejected";
 
 export interface NarrativeEvidenceBundle {
   bundleVersion: typeof NARRATIVE_EVIDENCE_BUNDLE_VERSION;
@@ -78,6 +92,8 @@ export interface NarrativeEvidenceBundle {
     rejectedByRedaction: number;
     rejectedByBudget: number;
   };
+  /** Present only when excerpts is empty, so the portal can explain why no narrative will be generated instead of just showing nothing. */
+  emptyReason?: NarrativeEvidenceEmptyReason;
 }
 
 export interface SourceSelection {
@@ -95,6 +111,14 @@ export interface SourceSelection {
   };
 }
 
+export type ProviderDiagnosticCode =
+  | "not-installed"
+  | "no-project-directory"
+  | "no-matching-sessions"
+  | "format-unsupported"
+  | "scope-unknown"
+  | "scanned";
+
 export interface ProviderSelection {
   provider: ProviderId;
   selected: true;
@@ -103,6 +127,12 @@ export interface ProviderSelection {
   filesDiscovered: number;
   sessionsMatched: number;
   sessionsIncluded: number;
+  warnings?: number;
+  /**
+   * Content-free outcome for this provider's discovery pass. Omitted keeps
+   * pre-1.3.0 reading code working (absence has always meant "scanned").
+   */
+  diagnostic?: ProviderDiagnosticCode;
 }
 
 export interface RepositoryIdentity {
@@ -126,6 +156,82 @@ export interface TimeWindow {
   timezone: "UTC";
   startBasis: "explicit" | "default-lookback" | "empty-repository";
   endBasis: "explicit" | "latest-session" | "head-commit" | "unix-epoch";
+  /** Optional coarse local-time offset used only to make work-pattern hours meaningful. */
+  utcOffsetMinutes?: number;
+}
+
+export type GeneratedNarrativeSections = {
+  headline: string;
+  narrative: string;
+  turningPoint: string;
+  learnings: string[];
+  decisionPatterns: string[];
+  standoutTraits: string[];
+  growthEdge: string;
+};
+
+export type StoryPackPhase = "discover" | "decide" | "deliver";
+export type StoryPackMomentKind = "discovery" | "decision" | "breakthrough" | "delivery";
+
+export interface StoryPackSource {
+  ref: string;
+  provider: ProviderId | "git";
+  sessionRef?: string;
+  occurredAt: IsoDateTime;
+  evidenceRefs: string[];
+  excerptRef?: string;
+  metrics: {
+    turns: number;
+    assistantMessages: number;
+    toolCalls: number;
+  };
+}
+
+export interface ReportStoryPackV2 {
+  version: "2.0.0";
+  sources: StoryPackSource[];
+  hero: { headline: string; summary: string };
+  buildArc: Array<{
+    phase: StoryPackPhase;
+    headline: string;
+    summary: string;
+    sourceRefs: string[];
+  }>;
+  moments: Array<{
+    phase: StoryPackPhase;
+    kind: StoryPackMomentKind;
+    title: string;
+    whatHappened: string;
+    whyItMattered: string;
+    sourceRefs: string[];
+  }>;
+  turningPoint: { quote: string; sourceRefs: string[] };
+  decisions: Array<{
+    title: string;
+    rationale: string;
+    outcome: string;
+    sourceRefs: string[];
+  }>;
+  learnings: Array<{ title: string; detail: string; sourceRefs: string[] }>;
+  standoutTraits: Array<{ title: string; detail: string; sourceRefs: string[] }>;
+  growthEdge: {
+    title: string;
+    observation: string;
+    nextStep: string;
+    sourceRefs: string[];
+  };
+}
+
+export interface GeneratedNarrative {
+  version: "1.0.0" | "2.0.0";
+  generatedAt: IsoDateTime;
+  mode: "local";
+  provider: string;
+  model: string;
+  sections: GeneratedNarrativeSections;
+  /** Present for new reports; legacy sections remain readable during rollout. */
+  storyPack?: ReportStoryPackV2;
+  fallbacksUsed: string[];
 }
 
 export type SessionStatus = "completed" | "aborted" | "incomplete" | "unknown";
@@ -276,6 +382,10 @@ export interface Provenance {
 export type QualityWarningCode =
   | "CODEX_ROOT_UNAVAILABLE"
   | "CLAUDE_CODE_ROOT_UNAVAILABLE"
+  | "GEMINI_ANTIGRAVITY_ROOT_UNAVAILABLE"
+  | "CURSOR_ROOT_UNAVAILABLE"
+  | "PROVIDER_FORMAT_UNVERIFIED"
+  | "PROVIDER_SCOPE_UNKNOWN"
   | "SESSION_FILE_LIMIT_REACHED"
   | "SESSION_FILE_TOO_LARGE"
   | "SESSION_LINE_TOO_LARGE"

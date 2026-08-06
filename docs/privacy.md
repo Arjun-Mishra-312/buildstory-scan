@@ -17,11 +17,11 @@
 | One-use bearer | Connect response and local protected state | Never | Authorization header on one PUT and bounded GETs |
 | Status/report response | Status only | Never | Received from local web app; no source snapshot returned |
 
-`inspect` and `scan` never call the network. `inspect` does not read Codex roots. `scan` will not read them until the exact `--consent local-scan` is present.
+`inspect` never calls the network. `scan` will not read session roots until the exact `--consent local-scan` is present. In local narrative mode, the scanner may call Ollama over loopback; this is not a non-local transmission and excerpts remain in process memory.
 
 `connect` is a separate control plane. Mock mode contacts nothing. Real mode contacts only an explicit loopback API, or one explicit HTTPS host confirmed via `--allow-host`/`--remote`, and sends the bounded request in [`connect-protocol.md`](connect-protocol.md). It does not read a repository or snapshot. The upload-session ID and device code are kept only in process memory and the POST body, never printed, logged, hashed, or persisted. Because `--code` can remain in PowerShell history or privileged process listings, dashboard codes must be short-lived and one-use.
 
-`scan-upload` is the only data plane. It requires both local-scan and local-dashboard upload consent, then sends only the already validated canonical `ProjectSnapshot`. No raw input, adapter object, repository path, environment dump, error detail, cookie, multipart attachment, or wrapper object can reach the transport API.
+`scan-upload` is the only non-loopback data plane. It requires both local-scan and local-dashboard upload consent, then sends only the already validated canonical `ProjectSnapshot`. In local mode the upload can contain `generatedNarrative`, but never `narrativeEvidence`; in cloud mode the reviewed, redacted `narrativeEvidence` excerpts are the explicit opt-in exception. No raw input, adapter object, repository path, environment dump, error detail, cookie, multipart attachment, or wrapper object can reach the transport API.
 
 The bearer is stored only in platform-local state with mode 0600 where supported. It authorizes one snapshot PUT. After verified acceptance, it remains only for authenticated GET status/report calls until its short expiry; local state marks the PUT as used, so the CLI cannot repeat it. A failed/ambiguous upload attempt consumes local PUT state and is never retried silently.
 
@@ -40,7 +40,7 @@ Status report summaries are untrusted local-API data. They are size/type checked
 
 ## Limits and residual risk
 
-Pattern and entropy rules cannot identify every credential, particularly new formats or memorable/low-entropy secrets. Repository display names, branch names, model/tool names, timestamps, aggregate behavior, and stable hashes can identify or correlate a person or private project. A repository-path hash based on low-entropy input can be guessable.
+Pattern and entropy rules cannot identify every credential, particularly new formats or memorable/low-entropy secrets. Repository display names, branch names, model/tool names, timestamps, aggregate behavior, and stable hashes can identify or correlate a person or private project. A repository-path hash based on low-entropy input can be guessable. The optional `timeWindow.utcOffsetMinutes` is a coarse local-time hint: it contains no location name, but it is still a small privacy trade and is omitted when unavailable.
 
 Codex stores content and metadata together. Parsing a matched JSONL record necessarily materializes the local JSON value in process memory, although content-bearing properties are not interpreted, retained, logged, cached, or serialized. JavaScript does not guarantee immediate memory zeroization. Oversized or malformed records are skipped with content-free warnings.
 

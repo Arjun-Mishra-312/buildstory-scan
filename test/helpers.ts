@@ -15,9 +15,9 @@ export interface LocalFixture {
   cleanup(): Promise<void>;
 }
 
-/** Mirrors packages/buildstory-scanner/src/sources/claude-code.ts's encodedDirectoryPrefix exactly. */
+/** Mirrors Claude Code's per-character non-alphanumeric path encoding. */
 export function encodedClaudeCodeProjectDirectory(repositoryRoot: string): string {
-  return path.resolve(repositoryRoot).replaceAll(/[^A-Za-z0-9]+/g, "-").toLocaleLowerCase("en-US");
+  return path.resolve(repositoryRoot).replaceAll(/[^A-Za-z0-9]/g, "-").toLocaleLowerCase("en-US");
 }
 
 async function git(repository: string, args: string[], env: NodeJS.ProcessEnv = {}): Promise<void> {

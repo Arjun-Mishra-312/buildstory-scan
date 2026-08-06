@@ -9,12 +9,16 @@ import type {
   SessionSummary,
   TokenUsage,
 } from "../contract.js";
+import { ASSISTANT_DECISION_MAX_RAW_CHARS, MAX_ASSISTANT_DECISIONS_PER_SESSION, orderSessionCandidates } from "./narrative-evidence.js";
 import { consumeJsonLines } from "./jsonl.js";
 import { relationToRepository } from "./path-scope.js";
 import type {
+  NormalizedConversationEvent,
+  ProviderDescriptor,
   ProviderDiscoveryContext,
   ProviderDiscoveryResult,
   ProviderSession,
+  RawExcerptCandidate,
   SessionProviderAdapter,
 } from "./types.js";
 
@@ -325,8 +329,22 @@ async function parseCodexFile(
       toolCounts,
       modelCounts,
       evidence: evidence.sort((left, right) => compareStrings(left.evidenceId, right.evidenceId)),
+      sourceFilePath: located.filePath,
     },
   };
+}
+
+function extractResponseMessageText(content: unknown): string | null {
+  if (typeof content === "string") return content || null;
+  if (Array.isArray(content)) {
+    for (const block of content) {
+      if (isRecord(block)) {
+        const text = asString(block.text);
+        if (text) return text;
+      }
+    }
+  }
+  return null;
 }
 
 async function discoverRootFiles(root: CodexSourceRoot): Promise<{ files: LocatedSessionFile[]; available: boolean; limitReached: boolean }> {
@@ -377,6 +395,13 @@ export interface CodexAdapterOptions {
 export class CodexSessionAdapter implements SessionProviderAdapter {
   public readonly provider = "codex" as const;
   public readonly sessionFormat = "codex-jsonl" as const;
+  public readonly descriptor: ProviderDescriptor = {
+    id: "codex",
+    displayName: "Codex",
+    sessionFormat: "codex-jsonl",
+    capabilities: { metadata: true, narrativeEvidence: true },
+    formatVersions: ["codex-jsonl-v1"],
+  };
   private readonly roots: CodexSourceRoot[];
 
   public constructor(options: CodexAdapterOptions = {}) {
@@ -450,5 +475,121 @@ export class CodexSessionAdapter implements SessionProviderAdapter {
       sessions: deduplicatedSessions,
       warnings,
     };
+  }
+
+  // --- Opt-in narrative-evidence: shared-shape read + provider recognition -
+  // Same second-pass pattern as ClaudeCodeSessionAdapter: never invoked by
+  // discover()/buildProjectSnapshot(), only reachable through the shared
+  // selector's own excerpts pass.
+
+  public async readEvents(
+    session: ProviderSession,
+    _context: ProviderDiscoveryContext,
+  ): Promise<NormalizedConversationEvent[]> {
+    if (!session.sourceFilePath) return [];
+    const sessionRef = session.summary.sessionRef;
+    // Codex records the same conversation twice - once as compact event_msg
+    // records, once as full response_item records - so event-sourced text is
+    // preferred over response-sourced text when both are present, mirroring
+    // the "turns = eventUserMessages || responseUserMessages" preference
+    // already used for metrics in parseCodexFile above.
+    const eventSourced: NormalizedConversationEvent[] = [];
+    const responseSourced: NormalizedConversationEvent[] = [];
+    const toolCalls: NormalizedConversationEvent[] = [];
+    let ordinal = 0;
+
+    await consumeJsonLines(session.sourceFilePath, (line) => {
+      let record: JsonRecord;
+      try {
+        const parsed: unknown = JSON.parse(line.toString("utf8"));
+        if (!isRecord(parsed)) return true;
+        record = parsed;
+      } catch {
+        return true;
+      }
+      const timestamp = isoTimestamp(record.timestamp) ?? new Date(0).toISOString();
+      const recordType = asString(record.type);
+      const payload = asRecord(record.payload) ?? {};
+      const payloadType = asString(payload.type);
+
+      if (recordType === "event_msg") {
+        if (payloadType === "user_message") {
+          const text = asString(payload.message);
+          if (text) {
+            ordinal += 1;
+            eventSourced.push({ provider: "codex", sessionRef, ordinal, occurredAt: timestamp, role: "user", text, eventKind: "message" });
+          }
+        } else if (payloadType === "agent_message") {
+          const text = asString(payload.message);
+          if (text) {
+            ordinal += 1;
+            eventSourced.push({ provider: "codex", sessionRef, ordinal, occurredAt: timestamp, role: "assistant", text, eventKind: "message" });
+          }
+        }
+        return true;
+      }
+
+      if (recordType === "response_item") {
+        if (payloadType === "message") {
+          const role = asString(payload.role);
+          const text = extractResponseMessageText(payload.content);
+          if (text && (role === "user" || role === "assistant")) {
+            ordinal += 1;
+            responseSourced.push({ provider: "codex", sessionRef, ordinal, occurredAt: timestamp, role, text, eventKind: "message" });
+          }
+          return true;
+        }
+        let toolName: string | null = null;
+        if (payloadType === "function_call" || payloadType === "custom_tool_call") {
+          toolName = asString(payload.name) ?? "unknown-tool";
+        } else if (payloadType === "web_search_call") {
+          toolName = "web_search";
+        } else if (payloadType === "local_shell_call") {
+          toolName = "local_shell";
+        }
+        if (toolName) {
+          ordinal += 1;
+          toolCalls.push({ provider: "codex", sessionRef, ordinal, occurredAt: timestamp, role: "assistant", text: null, eventKind: "tool-call", toolName });
+        }
+      }
+      return true;
+    });
+
+    const messageEvents = eventSourced.length > 0 ? eventSourced : responseSourced;
+    return [...messageEvents, ...toolCalls].sort((left, right) => left.ordinal - right.ordinal);
+  }
+
+  public extractCandidates(sessionRef: string, events: NormalizedConversationEvent[]): RawExcerptCandidate[] {
+    let firstUser: { text: string; occurredAt: string } | null = null;
+    let lastUser: { text: string; occurredAt: string } | null = null;
+    let pendingAssistantText: { text: string; occurredAt: string } | null = null;
+    let assistantDecisions = 0;
+    const turningPoints: RawExcerptCandidate[] = [];
+
+    for (const event of events) {
+      if (event.role === "user" && event.eventKind === "message" && event.text) {
+        if (!firstUser) firstUser = { text: event.text, occurredAt: event.occurredAt };
+        lastUser = { text: event.text, occurredAt: event.occurredAt };
+        pendingAssistantText = null;
+        continue;
+      }
+      if (event.role === "assistant" && event.eventKind === "message" && event.text && event.text.length <= ASSISTANT_DECISION_MAX_RAW_CHARS) {
+        pendingAssistantText = { text: event.text, occurredAt: event.occurredAt };
+        continue;
+      }
+      // Codex has no Edit/Write-named tool taxonomy to filter on the way
+      // Claude Code does, so any tool call immediately following assistant
+      // text is treated as the turning point - a deliberately broader
+      // heuristic for this provider's local format.
+      if (event.role === "assistant" && event.eventKind === "tool-call") {
+        if (pendingAssistantText && assistantDecisions < MAX_ASSISTANT_DECISIONS_PER_SESSION) {
+          turningPoints.push({ sessionRef, ...pendingAssistantText, role: "assistant-decision" });
+          assistantDecisions += 1;
+          pendingAssistantText = null;
+        }
+      }
+    }
+
+    return orderSessionCandidates(sessionRef, { sessionTitle: null, firstUser, lastUser, turningPoints });
   }
 }

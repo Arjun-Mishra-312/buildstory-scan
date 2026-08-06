@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { canonicalJson } from "../src/canonical-json.js";
 import { buildProjectSnapshot } from "../src/scanner.js";
+import { createOllamaNarrativeGenerator } from "../src/narrative/local.js";
 import { validateProjectSnapshot } from "../src/validation.js";
 import { createLocalFixture } from "./helpers.js";
 
@@ -157,6 +158,103 @@ test("narrativeEvidence is absent by default and opt-in produces real, redacted 
     assert.equal(serialized.includes("synthetic tool payload"), false);
     assert.equal(serialized.includes(fixture.repository), false);
   } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("local narrative generation stays content-free at the upload boundary and re-redacts generated prose", async () => {
+  const fixture = await createLocalFixture();
+  try {
+    const snapshot = await buildProjectSnapshot({
+      repositoryPath: fixture.repository,
+      consent: "local-scan",
+      providers: ["claude-code"],
+      claudeCodeHome: fixture.claudeCodeHome,
+      since: "2026-08-03T00:00:00Z",
+      until: "2026-08-04T00:00:00Z",
+      utcOffsetMinutes: -420,
+      narrative: { mode: "local", model: "fixture-local" },
+      narrativeGenerator: async ({ excerpts }) => {
+        assert.ok(excerpts.length > 0);
+        return {
+          provider: "ollama" as const,
+          model: "fixture-local",
+          sections: {
+            headline: "Local build story",
+            narrative: "Generated on the local model.",
+            turningPoint: "The private file /Users/arjun/private/repo and https://secret.example.invalid were never safe to upload.",
+            learnings: ["Keep the model local."],
+            decisionPatterns: ["Prefer bounded, reviewable changes."],
+            standoutTraits: ["Checks the boundary."],
+            growthEdge: "Validate the weak product-instinct proxy with more direct evidence.",
+          },
+          fallbacksUsed: [],
+        };
+      },
+    });
+    validateProjectSnapshot(snapshot);
+    assert.equal(snapshot.narrativeEvidence, undefined);
+    assert.equal(snapshot.generatedNarrative?.mode, "local");
+    assert.equal(snapshot.generatedNarrative?.model, "fixture-local");
+    assert.match(snapshot.generatedNarrative?.sections.turningPoint ?? "", /\[(absolute-path|remote-url|raw-host)\]/);
+    assert.doesNotMatch(canonicalJson(snapshot), /Users\/arjun\/private\/repo|secret\.example\.invalid/);
+    assert.equal(snapshot.timeWindow.utcOffsetMinutes, -420);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("the Ollama generator uses only loopback HTTP and splits narrative/profile calls", async () => {
+  const fixture = await createLocalFixture();
+  const originalFetch = globalThis.fetch;
+  const originalBaseUrl = process.env.BUILDSTORY_OLLAMA_BASE_URL;
+  const requests: Array<{ url: string; body: string }> = [];
+  let completionCalls = 0;
+  process.env.BUILDSTORY_OLLAMA_BASE_URL = "http://127.0.0.1:11434";
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    const body = typeof init?.body === "string" ? init.body : "";
+    requests.push({ url, body });
+    if (url.endsWith("/api/tags")) {
+      return new Response(JSON.stringify({ models: [{ name: "gemma4:12b" }] }), { status: 200 });
+    }
+    completionCalls += 1;
+    const response = completionCalls === 1
+      ? {
+          headline: "Local story",
+          narrative: "A local narrative.",
+          turningPoint: "The model mentioned app/api/route.ts and https://secret.example.invalid.",
+          learnings: ["Keep excerpts local."],
+        }
+      : {
+          decisionPatterns: ["Review before shipping."],
+          standoutTraits: ["Keeps the feedback loop tight."],
+          growthEdge: "Validate the weak product-instinct proxy with more evidence.",
+        };
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(response) } }] }), { status: 200 });
+  }) as typeof fetch;
+  try {
+    const snapshot = await buildProjectSnapshot({
+      repositoryPath: fixture.repository,
+      consent: "local-scan",
+      providers: ["claude-code"],
+      claudeCodeHome: fixture.claudeCodeHome,
+      since: "2026-08-03T00:00:00Z",
+      until: "2026-08-04T00:00:00Z",
+      narrative: { mode: "local" },
+      narrativeGenerator: createOllamaNarrativeGenerator(),
+    });
+    assert.equal(snapshot.narrativeEvidence, undefined);
+    assert.equal(snapshot.generatedNarrative?.model, "gemma4:12b");
+    assert.equal(completionCalls, 2);
+    assert.equal(requests.length, 3);
+    assert.ok(requests.every((request) => request.url.startsWith("http://127.0.0.1:11434/")));
+    assert.equal(requests.some((request) => request.body.includes("/Users/")), false);
+    assert.doesNotMatch(snapshot.generatedNarrative?.sections.turningPoint ?? "", /app\/api\/route\.ts|secret\.example\.invalid/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalBaseUrl === undefined) delete process.env.BUILDSTORY_OLLAMA_BASE_URL;
+    else process.env.BUILDSTORY_OLLAMA_BASE_URL = originalBaseUrl;
     await fixture.cleanup();
   }
 });

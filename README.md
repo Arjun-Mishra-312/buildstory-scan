@@ -2,9 +2,9 @@
 
 BuildStory Scanner is a TypeScript/Node.js CLI for a desktop-first community of AI-assisted software builders. It inspects one user-selected Git worktree read-only, discovers repository-scoped Codex sessions, discards content-bearing fields locally, and emits a deterministic `ProjectSnapshot 1.0.0`.
 
-Version `0.3.0` adds a real end-to-end transport to a BuildStory web app: a separately running **local** app by default, or a single explicitly pinned **HTTPS remote host** per connection (`--remote`, or `--api-base-url`/`--allow-host` for a non-default host). No unpinned or discovered remote endpoint is accepted. The package remains private and unpublished.
+Version `0.4.0` adds a real end-to-end transport to a BuildStory web app: a separately running **local** app by default, or a single explicitly pinned **HTTPS remote host** per connection (`--remote`, or `--api-base-url`/`--allow-host` for a non-default host). No unpinned or discovered remote endpoint is accepted. The package remains private and unpublished.
 
-In the consolidated repository, source lives at `packages/buildstory-scanner`, the web app lives at `apps/buildstory-web`, and the verified installable archive is `artifacts/buildstory-scanner-0.3.0.tgz`. Nothing depends on the earlier Codex artifact folders.
+In the consolidated repository, source lives at `packages/buildstory-scanner`, the web app lives at `apps/buildstory-web`, and the verified installable archive is `artifacts/buildstory-scanner-0.4.0.tgz`. Nothing depends on the earlier Codex artifact folders.
 
 ## Install on PowerShell
 
@@ -34,7 +34,7 @@ Get-Command buildstory
 To install the unpublished local tarball:
 
 ```powershell
-npm install --global 'C:\path\to\buildstory-scanner-0.3.0.tgz'
+npm install --global 'C:\path\to\buildstory-scanner-0.4.0.tgz'
 buildstory --version
 ```
 
@@ -128,7 +128,10 @@ See [`docs/connect-protocol.md`](docs/connect-protocol.md) and [`docs/upload-lif
 
 ## Local-only inspect and scan
 
-These commands never use the network:
+These commands never use a non-loopback network destination. `inspect` is fully
+offline; `scan` may call Ollama on loopback for local-first narrative prose and
+never sends excerpts to a non-loopback model unless cloud mode is explicitly
+selected through a connected dashboard:
 
 ```powershell
 buildstory inspect --repo 'C:\path\to\repository'
@@ -163,7 +166,7 @@ Recommended PowerShell copy for the local demo:
 
 ```text
 Install the unpublished local CLI first (Node.js 20+):
-  npm install --global "C:\path\to\buildstory-scanner-0.3.0.tgz"
+  npm install --global "C:\path\to\buildstory-scanner-0.4.0.tgz"
 
 With the local BuildStory web app running:
   buildstory connect "UPLOAD_SESSION_ID" --code "DEVICE_CODE" --api-base-url "http://127.0.0.1:3000/"
@@ -184,7 +187,7 @@ The architecture was informed by, but does not copy or claim compatibility with:
 - Y Combinator's official [Paxel overview](https://paxel.ycombinator.com/) and [technical data-handling documentation](https://paxel.ycombinator.com/data-handling): useful reference ideas include local Docker analysis, read-only repository mounting, repository/session consent controls, bounded/redacted outbound structures, and explicit source/transcript boundaries.
 - [`staru09/open-paxel`](https://github.com/staru09/open-paxel), cited only as an independent third-party local-first implementation example.
 
-No Paxel or Open Paxel implementation was copied, imported, or used as a dependency. BuildStory deliberately keeps a narrower payload: no transcript excerpts, file paths, commit subjects, author details, remote hosts, raw remotes, LLM calls, or source database. These references were reviewed on 2026-08-03 and are provenance context, not normative dependencies.
+No Paxel or Open Paxel implementation was copied, imported, or used as a dependency. BuildStory deliberately keeps a narrower payload: no raw transcript excerpts in the default snapshot, file paths, commit subjects, author details, remote hosts, raw remotes, non-loopback model calls in local mode, or source database. These references were reviewed on 2026-08-03 and are provenance context, not normative dependencies.
 
 ## Development and smoke tests
 

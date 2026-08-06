@@ -3,6 +3,7 @@ import { chmod, lstat, mkdir, open, readFile, rename, rm } from "node:fs/promise
 import os from "node:os";
 import path from "node:path";
 import { PROJECT_SNAPSHOT_SCHEMA_VERSION } from "./contract.js";
+import type { NarrativeMode } from "./contract.js";
 import { ScannerError } from "./errors.js";
 
 const STATE_FILE_NAME = "active-upload-state.json";
@@ -19,6 +20,8 @@ export interface StoredUploadGrant extends StateBase {
   phase: "ready";
   snapshotEndpoint: string;
   maxBytes: number;
+  /** Absent only for grants written by pre-mode CLIs; those intentionally default to cloud. */
+  narrative?: { mode: NarrativeMode; model: string | null };
 }
 
 export interface StoredStatusAccess extends StateBase {
@@ -64,12 +67,13 @@ function validateStoredState(value: unknown): StoredConnectionState {
   }
 
   if (value.phase === "ready"
-    && hasExactKeys(value, ["stateVersion", "phase", "bearerToken", "snapshotEndpoint", "expiresAt", "schemaVersion", "maxBytes"])
+    && (hasExactKeys(value, ["stateVersion", "phase", "bearerToken", "snapshotEndpoint", "expiresAt", "schemaVersion", "maxBytes"]) || hasExactKeys(value, ["stateVersion", "phase", "bearerToken", "snapshotEndpoint", "expiresAt", "schemaVersion", "maxBytes", "narrative"]))
     && typeof value.snapshotEndpoint === "string"
     && value.snapshotEndpoint.length >= 1
     && value.snapshotEndpoint.length <= 2048
     && Number.isSafeInteger(value.maxBytes)
-    && (value.maxBytes as number) >= 1) {
+    && (value.maxBytes as number) >= 1
+    && (value.narrative === undefined || (isRecord(value.narrative) && hasExactKeys(value.narrative, ["mode", "model"]) && ["local", "cloud", "off"].includes(value.narrative.mode as string) && (value.narrative.model === null || typeof value.narrative.model === "string")))) {
     return value as unknown as StoredUploadGrant;
   }
 
@@ -198,8 +202,19 @@ export async function getStoredStatusAccess(override?: string, now = new Date())
   return state;
 }
 
-/** Atomically claims the one-PUT grant and removes it before any upload request begins. */
-export async function consumeUploadGrant(override?: string, now = new Date()): Promise<StoredUploadGrant> {
+export async function getStoredUploadGrant(override?: string, now = new Date()): Promise<StoredUploadGrant | null> {
+  const state = await readStateFile(statePath(override));
+  if (state === null || state.phase !== "ready" || Date.parse(state.expiresAt) <= now.getTime()) return null;
+  return state;
+}
+
+export type UploadGrantLease = {
+  grant: StoredUploadGrant;
+  release(outcome: "success" | "retryable" | "terminal"): Promise<void>;
+};
+
+/** Atomically claims the grant while retaining a recoverable lease until the upload outcome is known. */
+export async function consumeUploadGrant(override?: string, now = new Date()): Promise<UploadGrantLease> {
   const directory = stateDirectory(override);
   const activePath = statePath(override);
   const claimedPath = path.join(directory, `.claimed-upload-grant-${randomUUID()}.json`);
@@ -217,6 +232,7 @@ export async function consumeUploadGrant(override?: string, now = new Date()): P
   }
 
   let restoreClaim = false;
+  let leaseCreated = false;
   try {
     const state = await readStateFile(claimedPath);
     if (state === null) {
@@ -233,11 +249,24 @@ export async function consumeUploadGrant(override?: string, now = new Date()): P
     if (Date.parse(state.expiresAt) <= now.getTime()) {
       throw new ScannerError("UPLOAD_GRANT_EXPIRED", "The one-time local upload grant expired. Run buildstory connect again.", 2);
     }
-    return state;
+    leaseCreated = true;
+    let released = false;
+    return {
+      grant: state,
+      async release(outcome) {
+        if (released) return;
+        released = true;
+        if (outcome === "retryable") {
+          await rename(claimedPath, activePath).catch(() => undefined);
+        } else {
+          await rm(claimedPath, { force: true }).catch(() => undefined);
+        }
+      },
+    };
   } finally {
     if (restoreClaim) {
       await rename(claimedPath, activePath).catch(() => undefined);
-    } else {
+    } else if (!leaseCreated) {
       await rm(claimedPath, { force: true }).catch(() => undefined);
     }
   }

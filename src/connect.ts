@@ -1,5 +1,5 @@
 import { storeUploadGrant, type StoredUploadGrant } from "./connection-state.js";
-import { PROJECT_SNAPSHOT_SCHEMA_VERSION, SCANNER_VERSION } from "./contract.js";
+import { PROJECT_SNAPSHOT_SCHEMA_VERSION, SCANNER_VERSION, type NarrativeMode } from "./contract.js";
 import { ScannerError } from "./errors.js";
 import { isLoopbackHostname, normalizeApiBase, resolveTrustedApiUrl } from "./loopback-url.js";
 
@@ -50,6 +50,7 @@ interface ConnectionRequest {
   capabilities: {
     projectSnapshotSchemaVersions: [typeof PROJECT_SNAPSHOT_SCHEMA_VERSION];
     snapshotUpload: false;
+    narrativeModes: ["local", "cloud", "off"];
   };
 }
 
@@ -136,7 +137,10 @@ function validateConnectionResponse(
   now: Date,
 ): StoredUploadGrant {
   if (!isRecord(value)
-    || !hasExactKeys(value, ["protocolVersion", "status", "uploadSessionId", "connectionId", "uploadGrant"])
+    || !(
+      hasExactKeys(value, ["protocolVersion", "status", "uploadSessionId", "connectionId", "uploadGrant"]) ||
+      hasExactKeys(value, ["protocolVersion", "status", "uploadSessionId", "connectionId", "uploadGrant", "narrative"])
+    )
     || value.protocolVersion !== CONNECT_PROTOCOL_VERSION
     || value.status !== "connected"
     || value.uploadSessionId !== uploadSessionId
@@ -175,6 +179,14 @@ function validateConnectionResponse(
     );
   }
 
+  let narrative: StoredUploadGrant["narrative"] = { mode: "cloud", model: null };
+  if ("narrative" in value) {
+    if (!isRecord(value.narrative) || !hasExactKeys(value.narrative, ["mode", "model"]) || !["local", "cloud", "off"].includes(value.narrative.mode as string) || (value.narrative.model !== null && (typeof value.narrative.model !== "string" || value.narrative.model.length > 160))) {
+      throw new ScannerError("CONNECT_RESPONSE_INVALID", "The local API returned an invalid narrative mode selection.");
+    }
+    narrative = { mode: value.narrative.mode as NarrativeMode, model: value.narrative.model as string | null };
+  }
+
   return {
     stateVersion: 1,
     phase: "ready",
@@ -183,6 +195,7 @@ function validateConnectionResponse(
     expiresAt: expiresAt.toISOString(),
     schemaVersion: PROJECT_SNAPSHOT_SCHEMA_VERSION,
     maxBytes: grant.maxBytes as number,
+    narrative,
   };
 }
 
@@ -240,6 +253,7 @@ export async function connectBuildStory(options: ConnectOptions): Promise<Connec
     capabilities: {
       projectSnapshotSchemaVersions: [PROJECT_SNAPSHOT_SCHEMA_VERSION],
       snapshotUpload: false,
+      narrativeModes: ["local", "cloud", "off"],
     },
   };
   const controller = new AbortController();

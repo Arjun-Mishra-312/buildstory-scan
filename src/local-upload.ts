@@ -227,20 +227,25 @@ export async function uploadProjectSnapshot(
     throw new ScannerError("SNAPSHOT_TOO_LARGE_FOR_GRANT", "The validated snapshot exceeds the dashboard grant's byte limit; nothing was sent.");
   }
 
-  const grant = await consumeUploadGrant(options.stateDirectory, options.now ?? new Date());
+  const lease = await consumeUploadGrant(options.stateDirectory, options.now ?? new Date());
+  const grant = lease.grant;
   if (payload.bytes.byteLength > grant.maxBytes) {
+    await lease.release("retryable");
     throw new ScannerError("SNAPSHOT_TOO_LARGE_FOR_GRANT", "The validated snapshot exceeds the claimed grant's byte limit; nothing was sent. Connect again after reducing the scan window.");
   }
   const uploadUrl = resolveTrustedApiUrl(grant.snapshotEndpoint);
   if (!uploadUrl) {
+    await lease.release("retryable");
     throw new ScannerError("UPLOAD_ENDPOINT_INVALID", "The claimed snapshot endpoint is unsafe. Nothing was sent; run connect again.");
   }
 
   const timeoutMilliseconds = validateTimeout(options.timeoutMilliseconds);
-  const response = await fetchWithTimeout(
-    options.fetchImplementation ?? globalThis.fetch,
-    uploadUrl,
-    {
+  let response: Response;
+  try {
+    response = await fetchWithTimeout(
+      options.fetchImplementation ?? globalThis.fetch,
+      uploadUrl,
+      {
       method: "PUT",
       headers: {
         accept: "application/json",
@@ -253,22 +258,30 @@ export async function uploadProjectSnapshot(
       cache: "no-store",
       credentials: "omit",
       redirect: "error",
-    },
-    timeoutMilliseconds,
-    "UPLOAD_UNAVAILABLE",
-    "The local dashboard upload endpoint is unavailable. The one-use grant was claimed; check the dashboard, then connect again before retrying.",
-  );
+      },
+      timeoutMilliseconds,
+      "UPLOAD_UNAVAILABLE",
+      "The local dashboard upload endpoint is unavailable. The grant remains available for a retry.",
+    );
+  } catch (error) {
+    await lease.release("retryable");
+    throw error;
+  }
   if (!response.ok) {
+    const retryable = response.status === 408 || response.status === 409 || response.status === 425 || response.status === 429 || response.status >= 500;
+    const body = (await response.json().catch(() => null)) as { error?: { message?: string; details?: string[] } } | null;
+    await lease.release(retryable ? "retryable" : "terminal");
     await response.body?.cancel().catch(() => undefined);
     throw new ScannerError(
       "UPLOAD_REJECTED",
-      `The local dashboard rejected the validated snapshot (HTTP ${response.status}). The one-use grant was consumed; check the dashboard and reconnect before retrying.`,
+      `The local dashboard rejected the validated snapshot (HTTP ${response.status}). ${body?.error?.message ?? "Request rejected."}${body?.error?.details?.length ? ` Details: ${body.error.details.join("; ")}` : ""}${retryable ? " The grant remains available for a retry." : " The grant cannot be reused."}`,
     );
   }
   const responseValue = await readBoundedJson(response, "UPLOAD_RESPONSE");
   const accepted = validateAcceptedResponse(responseValue, snapshot, payload.digest, uploadUrl);
   accepted.statusAccess.bearerToken = grant.bearerToken;
   accepted.statusAccess.expiresAt = grant.expiresAt;
+  await lease.release("success");
   try {
     await storeStatusAccess(accepted.statusAccess, options.stateDirectory);
   } catch {

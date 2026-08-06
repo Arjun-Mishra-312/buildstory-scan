@@ -236,3 +236,13 @@ export function detectKnownSecrets(value: string): RedactionCategory[] {
   }
   return [...findings].sort(compareStrings);
 }
+
+/** Normalize repository and branch identifiers before the location boundary check. */
+export function cleanIdentifier(input: string, maxLength = 160): string {
+  const redacted = input.normalize("NFC").trim();
+  const normalized = redacted
+    .replace(/[^A-Za-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, maxLength);
+  return normalized || "unknown";
+}

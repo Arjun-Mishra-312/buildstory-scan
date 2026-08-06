@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 import type { GitAggregateMetrics, QualityWarning, RepositoryIdentity, TimeWindow } from "./contract.js";
 import { sha256 } from "./canonical-json.js";
 import { ScannerError } from "./errors.js";
+import { cleanIdentifier } from "./redaction.js";
 import type { Redactor } from "./redaction.js";
 
 const execFileAsync = promisify(execFile);
@@ -86,7 +87,7 @@ function parseIsoDate(value: string | null): string | null {
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
-export async function inspectRepository(selectedPath: string, redactor: Redactor): Promise<RepositoryInspection> {
+export async function inspectRepository(selectedPath: string, redactor: Redactor, projectName?: string): Promise<RepositoryInspection> {
   let selectedRealPath: string;
   try {
     const stat = await lstat(selectedPath);
@@ -120,7 +121,7 @@ export async function inspectRepository(selectedPath: string, redactor: Redactor
   const headCommitCandidate = headOutput?.trim().toLocaleLowerCase("en-US") ?? "";
   const headCommit = /^[a-f0-9]{40,64}$/.test(headCommitCandidate) ? headCommitCandidate : null;
   const branchCandidate = branchOutput?.trim() ?? "";
-  const branch = branchCandidate ? redactor.cleanMetadata(branchCandidate, 256) : null;
+  const branch = branchCandidate ? cleanIdentifier(branchCandidate, 256) : null;
   const canonicalRemote = remoteOutput ? canonicalizeRemote(remoteOutput) : null;
   const fingerprintBasis = canonicalRemote ? "canonical-remote" : "local-path";
   const fingerprintInput = canonicalRemote
@@ -138,7 +139,7 @@ export async function inspectRepository(selectedPath: string, redactor: Redactor
     identity: {
       fingerprint: sha256(fingerprintInput),
       fingerprintBasis,
-      displayName: redactor.cleanMetadata(path.basename(rootPath), 160),
+       displayName: cleanIdentifier(projectName ?? path.basename(rootPath), 160),
       vcs: "git",
       rootPathIncluded: false,
       headCommit,

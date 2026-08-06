@@ -7,12 +7,16 @@ import { canonicalJson } from "./canonical-json.js";
 import { connectBuildStory } from "./connect.js";
 import type { ProviderId } from "./contract.js";
 import { PROJECT_SNAPSHOT_SCHEMA_VERSION, SCANNER_VERSION } from "./contract.js";
+import { getStoredUploadGrant } from "./connection-state.js";
 import { ScannerError, safeErrorMessage } from "./errors.js";
 import { readLocalDashboardStatus, uploadProjectSnapshot } from "./local-upload.js";
+import { createOllamaNarrativeGenerator, LocalNarrativeGenerationError } from "./narrative/local.js";
 import { writeSnapshotFile } from "./output.js";
 import { Redactor } from "./redaction.js";
 import { inspectRepository } from "./repository.js";
-import { buildProjectSnapshot, inspectSelectedRepository } from "./scanner.js";
+import { buildProjectSnapshot, inspectSelectedRepository, providerLabel } from "./scanner.js";
+import { isRegisteredProvider, REGISTERED_PROVIDER_IDS } from "./sources/registry.js";
+import type { ScanProgressEvent, ScanProgressReporter } from "./progress.js";
 
 /** The canonical hosted origin --remote expands to; kept separate from user input so it is never itself an injectable value. */
 const DEFAULT_REMOTE_API_BASE_URL = "https://buildstory.dev/";
@@ -50,11 +54,18 @@ Connection options:
 
 Scanner options:
   --repo <directory>         Selected Git worktree (required; use . for the current repo).
-  --source <list>            Comma-separated providers to scan: codex, claude-code
-                             (default: every supported provider).
+  --project-name <name>      Override the redacted project display name for a rare identifier collision.
+  --source <list>            Comma-separated providers to scan: codex, claude-code,
+                             cursor, gemini-antigravity - or "all" (default).
+                             gemini-antigravity is currently detection-only
+                             (installed/not-installed only, no session data);
+                             cursor is a best-effort, format-unverified adapter.
   --codex-home <directory>   Override the Codex session root.
   --claude-code-home <directory>
                              Override the Claude Code config directory (parent of "projects").
+  --cursor-home <directory>  Override the Cursor workspaceStorage root.
+  --antigravity-home <directory>
+                             Override Google Antigravity's local data directory.
   --since <ISO-8601>         Inclusive activity-window start.
   --until <ISO-8601>         Inclusive activity-window end.
   --consent local-scan       Allow local repository/session metadata reads.
@@ -63,13 +74,16 @@ Scanner options:
   --dry-run                  Validate and print the redacted snapshot; write no file.
   --output <file>            Atomically write outside the selected repository.
   --overwrite                Replace an existing regular output file.
-  --with-evidence            Opt in to a small, redacted set of conversation
-                             excerpts (narrativeEvidence) for AI narrative
-                             generation. Off by default. Requires --review.
-  --review                   Print the exact excerpts to be included and
-                             require typed confirmation before proceeding.
-                             Required whenever --with-evidence is set.
-  --quiet                    Suppress command success output.
+  --with-evidence            In cloud mode, opt in to a small, redacted set of
+                             conversation excerpts (narrativeEvidence). Off by
+                             default. Requires --review.
+  --review                   In cloud mode, print exact excerpts; in local
+                             mode, preview generated prose. Require confirmation.
+  --require-evidence         Strict mode: exit before upload/write if the
+                             evidence bundle would be empty. Requires
+                             --with-evidence. Without this flag, an empty
+                             bundle still proceeds as a metrics-only snapshot.
+  --quiet                    Suppress progress and non-error success output.
   --help                     Show this help.
   --version                  Show the scanner version.
 
@@ -81,18 +95,21 @@ using a short-lived, one-use grant. Browser cookies, redirects, unpinned hosts,
 source/file bodies, diffs, transcript bodies, tool arguments/results, file
 paths, and secret text are not sent.
 
---with-evidence is the one exception: with explicit --review confirmation, a
-bounded set of redacted conversation excerpts (narrativeEvidence) is included
-so a narrative can be generated from them. Every other field always stays
-content-free regardless of this flag.
+Local mode is the default for new connections and calls Ollama on loopback;
+generatedNarrative is uploaded but narrativeEvidence is never uploaded. Cloud
+mode is explicit and, with --review confirmation, includes a bounded set of
+redacted excerpts. Off mode uploads deterministic metrics/profile facts only.
 `;
 
 interface ParsedScannerArguments {
   command: "inspect" | "scan" | "scan-upload";
   repo: string;
+  projectName?: string;
   source: ProviderId[];
   codexHome?: string;
   claudeCodeHome?: string;
+  cursorHome?: string;
+  antigravityHome?: string;
   since?: string;
   until?: string;
   consent?: string;
@@ -102,6 +119,7 @@ interface ParsedScannerArguments {
   overwrite: boolean;
   withEvidence: boolean;
   review: boolean;
+  requireEvidence: boolean;
   quiet: boolean;
 }
 
@@ -123,17 +141,19 @@ type ParsedArguments = ParsedScannerArguments | ParsedConnectArguments | ParsedS
 
 const SCANNER_VALUE_OPTIONS = new Set([
   "--repo",
+  "--project-name",
   "--source",
   "--codex-home",
   "--claude-code-home",
+  "--cursor-home",
+  "--antigravity-home",
   "--since",
   "--until",
   "--consent",
   "--upload-consent",
   "--output",
 ]);
-const KNOWN_PROVIDERS: ReadonlySet<ProviderId> = new Set(["codex", "claude-code"]);
-const SCANNER_BOOLEAN_OPTIONS = new Set(["--dry-run", "--overwrite", "--quiet", "--with-evidence", "--review"]);
+const SCANNER_BOOLEAN_OPTIONS = new Set(["--dry-run", "--overwrite", "--quiet", "--with-evidence", "--review", "--require-evidence"]);
 const CONNECT_VALUE_OPTIONS = new Set(["--code", "--api-base-url", "--allow-host", "--timeout-ms"]);
 const CONNECT_BOOLEAN_OPTIONS = new Set(["--remote"]);
 
@@ -248,20 +268,21 @@ function parseScannerArguments(
   const repo = values.get("--repo");
   if (!repo) throw new ScannerError("REPOSITORY_REQUIRED", "--repo is required; use --repo . for the current repository.", 2);
   const rawSource = values.get("--source");
-  const source = rawSource
-    ? rawSource.split(",").map((value) => value.trim()).filter((value) => value.length > 0)
-    : [...KNOWN_PROVIDERS];
+  const source =
+    !rawSource || rawSource.trim() === "all"
+      ? [...REGISTERED_PROVIDER_IDS]
+      : rawSource.split(",").map((value) => value.trim()).filter((value) => value.length > 0);
   if (source.length === 0) {
-    throw new ScannerError("UNSUPPORTED_PROVIDER", "--source must name at least one provider.", 2);
+    throw new ScannerError("UNSUPPORTED_PROVIDER", "--source must name at least one provider, or \"all\".", 2);
   }
   if (new Set(source).size !== source.length) {
     throw new ScannerError("DUPLICATE_OPTION", "--source lists the same provider more than once.", 2);
   }
   for (const provider of source) {
-    if (!KNOWN_PROVIDERS.has(provider as ProviderId)) {
+    if (!isRegisteredProvider(provider)) {
       throw new ScannerError(
         "UNSUPPORTED_PROVIDER",
-        `--source does not support "${provider}"; use codex, claude-code, or a comma-separated list of both.`,
+        `--source does not support "${provider}"; use ${REGISTERED_PROVIDER_IDS.join(", ")}, "all", or a comma-separated list.`,
         2,
       );
     }
@@ -275,24 +296,31 @@ function parseScannerArguments(
     overwrite: flags.has("--overwrite"),
     withEvidence: flags.has("--with-evidence"),
     review: flags.has("--review"),
+    requireEvidence: flags.has("--require-evidence"),
     quiet: flags.has("--quiet"),
   } as const;
   const codexHome = values.get("--codex-home");
   const claudeCodeHome = values.get("--claude-code-home");
+  const cursorHome = values.get("--cursor-home");
+  const antigravityHome = values.get("--antigravity-home");
   const since = values.get("--since");
   const until = values.get("--until");
   const consent = values.get("--consent");
   const uploadConsent = values.get("--upload-consent");
   const output = values.get("--output");
+  const projectName = values.get("--project-name");
   return {
     ...common,
     ...(codexHome ? { codexHome } : {}),
     ...(claudeCodeHome ? { claudeCodeHome } : {}),
+    ...(cursorHome ? { cursorHome } : {}),
+    ...(antigravityHome ? { antigravityHome } : {}),
     ...(since ? { since } : {}),
     ...(until ? { until } : {}),
     ...(consent ? { consent } : {}),
     ...(uploadConsent ? { uploadConsent } : {}),
     ...(output ? { output } : {}),
+    ...(projectName ? { projectName } : {}),
   };
 }
 
@@ -310,7 +338,7 @@ function parseArguments(argv: string[]): ParsedArguments | "help" | "version" {
 
 function validateScannerArguments(args: ParsedScannerArguments): void {
   if (args.command === "inspect") {
-    if (args.dryRun || args.output || args.overwrite || args.consent || args.uploadConsent || args.codexHome || args.claudeCodeHome || args.since || args.until || args.withEvidence || args.review) {
+    if (args.dryRun || args.output || args.overwrite || args.consent || args.uploadConsent || args.codexHome || args.claudeCodeHome || args.cursorHome || args.antigravityHome || args.since || args.until || args.withEvidence || args.review || args.requireEvidence || args.projectName) {
       throw new ScannerError("INSPECT_OPTION_INVALID", "inspect accepts only --repo, --source, and --quiet.", 2);
     }
     return;
@@ -331,8 +359,11 @@ function validateScannerArguments(args: ParsedScannerArguments): void {
       2,
     );
   }
-  if (args.review && !args.withEvidence) {
-    throw new ScannerError("REVIEW_WITHOUT_EVIDENCE", "--review is only meaningful together with --with-evidence.", 2);
+  // In local mode --review previews generated prose, so it is intentionally
+  // valid without --with-evidence. The effective connection mode is resolved
+  // after parsing; cloud evidence still requires --with-evidence below.
+  if (args.requireEvidence && !args.withEvidence) {
+    throw new ScannerError("REQUIRE_EVIDENCE_WITHOUT_EVIDENCE", "--require-evidence requires --with-evidence.", 2);
   }
 
   if (args.command === "scan") {
@@ -360,34 +391,179 @@ function validateScannerArguments(args: ParsedScannerArguments): void {
   }
 }
 
-function scanOptions(parsed: ParsedScannerArguments) {
+type EffectiveNarrative = { mode: "local" | "cloud" | "off"; model: string | null };
+
+const PROGRESS_STAGE_LABELS: Record<ScanProgressEvent["stage"], string> = {
+  "inspect-repository": "Inspecting repository",
+  "discovering-providers": "Discovering providers",
+  "parsing-sessions": "Parsing sessions",
+  "aggregating-metrics": "Aggregating Git and usage",
+  "selecting-evidence": "Selecting/redacting evidence",
+  "resolving-model": "Resolving model",
+  "generating-story": "Generating story components (1/2)",
+  "generating-insights": "Generating insight components (2/2)",
+  "validating-story-pack": "Validating story pack",
+  uploading: "Uploading",
+  accepted: "Accepted",
+  failed: "Failed",
+};
+
+function createProgressReporter(quiet: boolean): { reporter: ScanProgressReporter; stop: () => void } {
+  if (quiet) return { reporter: () => undefined, stop: () => undefined };
+  const startedAt = Date.now();
+  const isTty = Boolean(process.stderr.isTTY);
+  let current: ScanProgressEvent | null = null;
+  let frame = 0;
+  let interval: ReturnType<typeof setInterval> | undefined;
+  let stopped = false;
+
+  const elapsed = () => `${((Date.now() - startedAt) / 1_000).toFixed(1)}s`;
+  const render = () => {
+    if (stopped || !current) return;
+    const provider = current.provider ? ` · ${current.provider}` : "";
+    const model = current.model ? ` · ${current.model}` : "";
+    const count = current.current !== undefined && current.total !== undefined ? ` · ${current.current}/${current.total}` : "";
+    const prefix = isTty ? ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"][frame % 10] : "•";
+    const line = `${prefix} ${PROGRESS_STAGE_LABELS[current.stage]}${provider}${model}${count} · ${elapsed()} — ${current.message}`;
+    if (isTty) process.stderr.write(`\r\x1b[2K${line}`);
+    else process.stderr.write(`[${new Date().toISOString()}] ${line}\n`);
+    frame += 1;
+  };
+  const reporter: ScanProgressReporter = (event) => {
+    if (stopped) return;
+    current = event;
+    if (isTty) {
+      if (!interval) interval = setInterval(render, 120);
+      render();
+    } else {
+      render();
+    }
+  };
+  const stop = () => {
+    if (stopped) return;
+    stopped = true;
+    if (interval) clearInterval(interval);
+    interval = undefined;
+    if (isTty) process.stderr.write("\r\x1b[2K");
+    else if (current) process.stderr.write("\n");
+  };
+  return { reporter, stop };
+}
+
+async function effectiveNarrative(parsed: ParsedScannerArguments): Promise<EffectiveNarrative> {
+  if (parsed.withEvidence) return { mode: "cloud", model: null };
+  if (parsed.command === "scan-upload") {
+    const grant = await getStoredUploadGrant();
+    if (grant?.narrative) return grant.narrative;
+    // A grant written by an old CLI has no mode block. Preserve its historical behavior.
+    return { mode: "cloud", model: null };
+  }
+  return { mode: "local", model: null };
+}
+
+function scanOptions(parsed: ParsedScannerArguments, narrative: EffectiveNarrative, onProgress?: ScanProgressReporter) {
+  const local = narrative.mode === "local";
+  const cloudEvidence = narrative.mode === "cloud" && parsed.withEvidence;
   return {
     repositoryPath: parsed.repo,
+    ...(parsed.projectName ? { projectName: parsed.projectName } : {}),
     consent: "local-scan" as const,
     providers: parsed.source,
     ...(parsed.codexHome ? { codexHome: parsed.codexHome } : {}),
     ...(parsed.claudeCodeHome ? { claudeCodeHome: parsed.claudeCodeHome } : {}),
+    ...(parsed.cursorHome ? { cursorHome: parsed.cursorHome } : {}),
+    ...(parsed.antigravityHome ? { antigravityHome: parsed.antigravityHome } : {}),
     ...(parsed.since ? { since: parsed.since } : {}),
     ...(parsed.until ? { until: parsed.until } : {}),
-    ...(parsed.withEvidence ? { narrativeEvidence: {} } : {}),
+    utcOffsetMinutes: -new Date().getTimezoneOffset(),
+    ...(cloudEvidence
+      ? { narrative: { mode: "cloud" as const, model: null }, narrativeEvidence: {} }
+      : narrative.mode === "local" || narrative.mode === "off"
+        ? { narrative: { mode: narrative.mode, model: narrative.model } }
+        : {}),
+    ...(local ? { narrativeGenerator: createOllamaNarrativeGenerator(narrative.model) } : {}),
+    ...(onProgress ? { onProgress } : {}),
   };
 }
 
-function printEvidenceForReview(snapshot: { narrativeEvidence?: { excerpts: Array<{ role: string; sessionRef: string; occurredAt: string; text: string }>; discarded: { candidates: number; rejectedByRedaction: number; rejectedByBudget: number } } }): void {
+function metricsOnlyOptions(parsed: ParsedScannerArguments, onProgress?: ScanProgressReporter) {
+  return scanOptions(parsed, { mode: "off", model: null }, onProgress);
+}
+
+interface ReviewableSnapshot {
+  sourceSelection: { providers: Array<{ provider: ProviderId; sessionsMatched: number; diagnostic?: string }> };
+  sessions: Array<{ sessionRef: string; provider: ProviderId }>;
+  narrativeEvidence?: {
+    excerpts: Array<{ role: string; sessionRef: string; occurredAt: string; text: string }>;
+    discarded: { candidates: number; rejectedByRedaction: number; rejectedByBudget: number };
+  };
+  generatedNarrative?: {
+    provider: string;
+    model: string;
+    fallbacksUsed: string[];
+    sections: {
+      headline: string;
+      narrative: string;
+      turningPoint: string;
+      learnings: string[];
+      decisionPatterns: string[];
+      standoutTraits: string[];
+      growthEdge: string;
+    };
+  };
+}
+
+function hasEvidence(snapshot: Pick<ReviewableSnapshot, "narrativeEvidence">): boolean {
+  return Boolean(snapshot.narrativeEvidence && snapshot.narrativeEvidence.excerpts.length > 0);
+}
+
+function printEvidenceForReview(snapshot: ReviewableSnapshot): void {
+  const sessionProvider = new Map(snapshot.sessions.map((session) => [session.sessionRef, session.provider]));
+  const excerptCountByProvider = new Map<ProviderId, number>();
+  for (const excerpt of snapshot.narrativeEvidence?.excerpts ?? []) {
+    const provider = sessionProvider.get(excerpt.sessionRef);
+    if (provider) excerptCountByProvider.set(provider, (excerptCountByProvider.get(provider) ?? 0) + 1);
+  }
+
+  process.stdout.write("Providers considered for narrative evidence:\n");
+  for (const selection of snapshot.sourceSelection.providers) {
+    const excerptCount = excerptCountByProvider.get(selection.provider) ?? 0;
+    const diagnosticSuffix = selection.diagnostic && selection.diagnostic !== "scanned" ? ` (${selection.diagnostic})` : "";
+    process.stdout.write(
+      `  ${providerLabel(selection.provider)}: ${selection.sessionsMatched} session${selection.sessionsMatched === 1 ? "" : "s"}, ${excerptCount} excerpt${excerptCount === 1 ? "" : "s"} selected${diagnosticSuffix}\n`,
+    );
+  }
+  process.stdout.write("\n");
+
   const bundle = snapshot.narrativeEvidence;
-  if (!bundle) {
-    process.stdout.write("No excerpts were selected for this scan; the evidence bundle would be empty.\n\n");
+  if (!bundle || bundle.excerpts.length === 0) {
+    process.stdout.write("No excerpts were selected for this scan; no LLM request will be made if you continue.\n\n");
     return;
   }
   process.stdout.write(
     `The following ${bundle.excerpts.length} redacted excerpt${bundle.excerpts.length === 1 ? "" : "s"} would be sent to the configured cloud model if you continue:\n\n`,
   );
   for (const excerpt of bundle.excerpts) {
-    process.stdout.write(`--- [${excerpt.role}] ${excerpt.sessionRef} @ ${excerpt.occurredAt} ---\n${excerpt.text}\n\n`);
+    const provider = sessionProvider.get(excerpt.sessionRef);
+    process.stdout.write(`--- ${provider ? `[${provider}] ` : ""}[${excerpt.role}] ${excerpt.sessionRef} @ ${excerpt.occurredAt} ---\n${excerpt.text}\n\n`);
   }
   process.stdout.write(
     `(${bundle.discarded.candidates} candidate${bundle.discarded.candidates === 1 ? "" : "s"} considered; ${bundle.discarded.rejectedByRedaction} dropped by redaction, ${bundle.discarded.rejectedByBudget} dropped by budget.)\n\n`,
   );
+}
+
+function printLocalNarrativeForReview(snapshot: ReviewableSnapshot): void {
+  const narrative = snapshot.generatedNarrative;
+  if (!narrative) {
+    process.stdout.write("Local narrative generation produced no prose; only the deterministic metrics will be uploaded.\n\n");
+    return;
+  }
+  process.stdout.write(`Local narrative generated by ${narrative.provider} (${narrative.model}). No excerpts will be uploaded in local mode.\n\n`);
+  process.stdout.write(`HEADLINE\n${narrative.sections.headline}\n\nNARRATIVE\n${narrative.sections.narrative}\n\nTURNING POINT\n${narrative.sections.turningPoint}\n\n`);
+  process.stdout.write(`LEARNINGS\n${narrative.sections.learnings.map((item) => `- ${item}`).join("\n")}\n\n`);
+  process.stdout.write(`DECISION PATTERNS\n${narrative.sections.decisionPatterns.map((item) => `- ${item}`).join("\n")}\n\n`);
+  process.stdout.write(`STANDOUT TRAITS\n${narrative.sections.standoutTraits.map((item) => `- ${item}`).join("\n")}\n\nGROWTH EDGE\n${narrative.sections.growthEdge}\n\n`);
+  if (narrative.fallbacksUsed.length) process.stdout.write(`Deterministic fallbacks used: ${narrative.fallbacksUsed.join(", ")}.\n\n`);
 }
 
 async function confirmProceed(prompt: string): Promise<boolean> {
@@ -462,12 +638,55 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
     return 0;
   }
 
-  const snapshot = await buildProjectSnapshot(scanOptions(parsed));
-  if (parsed.review) {
+  let activeNarrative = await effectiveNarrative(parsed);
+  if (activeNarrative.mode === "local" && parsed.withEvidence) {
+    throw new ScannerError("NARRATIVE_MODE_CONFLICT", "This connection is in local mode. Local generation never uploads excerpts; choose cloud mode in the dashboard before using --with-evidence.", 2);
+  }
+  if (activeNarrative.mode === "local" && parsed.requireEvidence) {
+    throw new ScannerError("REQUIRE_EVIDENCE_WITH_LOCAL", "--require-evidence applies only to cloud excerpt mode; local mode generates prose on this machine.", 2);
+  }
+
+  let progress = createProgressReporter(parsed.quiet);
+  let snapshot;
+  try {
+    try {
+      snapshot = await buildProjectSnapshot(scanOptions(parsed, activeNarrative, progress.reporter));
+    } catch (error) {
+      if (!(activeNarrative.mode === "local" && error instanceof LocalNarrativeGenerationError)) throw error;
+      progress.reporter({ stage: "failed", state: "failed", message: error.message });
+      progress.stop();
+      const canPrompt = Boolean(process.stdin.isTTY) && !parsed.quiet;
+      if (canPrompt) {
+        process.stdout.write(`Local narrative generation failed: ${error.message}\n`);
+        const switchToCloud = await confirmProceed("Switch to cloud mode? This will select and upload redacted excerpts");
+        progress = createProgressReporter(parsed.quiet);
+        if (switchToCloud) {
+          activeNarrative = { mode: "cloud", model: null };
+          snapshot = await buildProjectSnapshot(scanOptions({ ...parsed, withEvidence: true, review: true }, { mode: "cloud", model: null }, progress.reporter));
+        } else {
+          activeNarrative = { mode: "off", model: null };
+          snapshot = await buildProjectSnapshot(metricsOnlyOptions(parsed, progress.reporter));
+        }
+      } else {
+        progress = createProgressReporter(parsed.quiet);
+        activeNarrative = { mode: "off", model: null };
+        snapshot = await buildProjectSnapshot(metricsOnlyOptions(parsed, progress.reporter));
+      }
+    }
+    progress.stop();
+  if (parsed.requireEvidence && !hasEvidence(snapshot)) {
     printEvidenceForReview(snapshot);
+    process.stdout.write("metrics-only: no narrative evidence was found. --require-evidence is set, so nothing was written or uploaded.\n");
+    return 4;
+  }
+  if (parsed.review) {
+    if (activeNarrative.mode === "local" && snapshot.generatedNarrative) printLocalNarrativeForReview(snapshot);
+    else printEvidenceForReview(snapshot);
     const confirmed = await confirmProceed(
       parsed.command === "scan-upload"
-        ? "This will be sent to your configured Buildstory dashboard along with the rest of the snapshot."
+        ? activeNarrative.mode === "local"
+          ? "This will upload the generated local narrative and deterministic metrics. No conversation excerpts will leave this machine."
+          : "This will be sent to your configured Buildstory dashboard along with the rest of the snapshot."
         : "This will be included in the written snapshot file.",
     );
     if (!confirmed) {
@@ -476,7 +695,11 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
     }
   }
   if (parsed.command === "scan-upload") {
+    progress = createProgressReporter(parsed.quiet);
+    progress.reporter({ stage: "uploading", state: "start", message: "Uploading the validated snapshot." });
     const receipt = await uploadProjectSnapshot(snapshot);
+    progress.reporter({ stage: "accepted", state: "complete", message: "Dashboard accepted the snapshot." });
+    progress.stop();
     if (!parsed.quiet) {
       process.stdout.write(
         `Validated and uploaded ProjectSnapshot ${snapshot.schemaVersion}: ${receipt.payloadBytes} bytes, ${snapshot.sessions.length} sessions, ${snapshot.git.commits} commits, ${snapshot.quality.warningCount} warnings.\n`,
@@ -503,6 +726,12 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
     process.stdout.write(`Wrote ${snapshot.schemaVersion} snapshot ${snapshot.scanId} to ${writtenPath}\n`);
   }
   return 0;
+  } catch (error) {
+    progress.reporter({ stage: "failed", state: "failed", message: safeErrorMessage(error) });
+    throw error;
+  } finally {
+    progress.stop();
+  }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {

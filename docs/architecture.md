@@ -26,13 +26,13 @@ There is no repository/snapshot arrow into connect and no raw-input arrow into t
 
 `sources/codex.ts` is the first provider adapter. Discovery is deterministic and bounded by sorted traversal, depth/file limits, a 128 MiB file cap, a 4 MiB line cap, and no symlink following. An unrelated file closes when its metadata working directory proves it is out of scope. Matched message/reasoning bodies and tool arguments/results are counted by structural kind and discarded; they cannot enter the normalized provider result.
 
-`scanner.ts` derives a stable UTC window, filters sessions, aggregates model/tool/token use, builds structural milestones and opaque evidence, and produces the scan ID from canonical payload content. `redaction.ts` sanitizes retained strings. `validation.ts` uses the portable Draft 2020-12 schema. Identical inputs/options produce identical bytes.
+`scanner.ts` derives a stable UTC window, filters sessions, aggregates model/tool/token use, computes the deterministic builder profile, builds structural milestones and opaque evidence, and produces the scan ID from canonical payload content. Local mode can pass redacted in-memory excerpts to an injected Ollama generator; those excerpts are removed before the snapshot is finalized. `redaction.ts` sanitizes retained strings. `validation.ts` uses the portable Draft 2020-12 schema. Identical inputs/options produce identical bytes when the same injected generator result is supplied.
 
 `connect.ts` preserves protocol 1.0's bounded POST request and validates its new nested upload grant. It accepts mock mode, loopback HTTP(S), or one explicit HTTPS host confirmed via `--allow-host`/`--remote`; rejects redirects, cookies, and any other or unconfirmed host; caps responses; and never persists the dashboard session ID, device code, or connection ID.
 
-`connection-state.ts` is the only credential store. It uses platform-local state, refuses a symlink as its final directory/file, performs exclusive temporary writes and replacement, and requests 0700/0600 modes. State has two discriminated forms:
+`connection-state.ts` is the only credential store. It uses platform-local state, refuses a symlink as its final directory/file, performs exclusive temporary writes and replacement, and requests 0700/0600 modes. A ready grant also carries the explicit narrative mode/model selected in the dashboard; pre-mode grants are interpreted as cloud for compatibility. State has two discriminated forms:
 
-- `ready`: one-PUT bearer, same-origin snapshot endpoint, expiry, schema, and byte cap;
+- `ready`: one-PUT bearer, same-origin snapshot endpoint, expiry, schema, byte cap, and optional narrative mode/model;
 - `uploaded`: the same bearer plus same-origin status/report URLs, with PUT unavailable.
 
 The ready file is atomically claimed and removed before PUT, preventing concurrent CLI reuse. After a verified receipt, only read-access state is written back until expiry.
@@ -54,13 +54,13 @@ Commands are deliberately separated:
 
 - `connect`: credentials in, local grant out; no scan/upload;
 - `inspect`: repository identity only; no session read/network;
-- `scan`: local scan plus stdout/file output; no network;
+- `scan`: local scan plus stdout/file output; local narrative mode may use loopback Ollama, never a non-loopback host;
 - `scan-upload`: local scan, validation, explicit consent, one PUT to the connected origin;
 - `status`: local grant state or authenticated read-only dashboard GETs.
 
 ## Determinism and schema sharing
 
-Files, sessions, warnings, tools, models, milestones, evidence, object keys, and Git provenance labels are sorted. Default time bounds derive from repository/session state, not wall clock. JSON keys use locale-independent lexicographic ordering. The schema remains `ProjectSnapshot 1.0.0` for the coordinated local web API; scanner package version `0.3.0` identifies the new transport implementation.
+Files, sessions, warnings, tools, models, milestones, evidence, object keys, and Git provenance labels are sorted. Default time bounds derive from repository/session state, not wall clock. JSON keys use locale-independent lexicographic ordering. The current transport schema is `ProjectSnapshot 1.5.0`; the web app keeps frozen 1.3.0 and 1.2.0 validators for rollout compatibility. Scores are recomputed server-side from uploaded metrics; the scanner computes the same pure functions only to prompt local prose. The optional `timeWindow.utcOffsetMinutes` makes peak-hour analysis local-time aware without collecting a location name.
 
 The web app can import TypeScript exports from `@buildstory/scanner` and the portable schema from `@buildstory/scanner/schema`. The schema has no remote-host field and uses `additionalProperties: false` recursively.
 

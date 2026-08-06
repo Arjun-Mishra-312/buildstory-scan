@@ -4,20 +4,21 @@ import path from "node:path";
 import { compareStrings, sha256, shortHash } from "../canonical-json.js";
 import type {
   EvidenceReference,
-  NarrativeExcerpt,
   QualityWarning,
   SessionStatus,
   SessionSummary,
   TokenUsage,
 } from "../contract.js";
-import type { Redactor } from "../redaction.js";
+import { ASSISTANT_DECISION_MAX_RAW_CHARS, MAX_ASSISTANT_DECISIONS_PER_SESSION, orderSessionCandidates } from "./narrative-evidence.js";
 import { consumeJsonLines } from "./jsonl.js";
 import { relationToRepository } from "./path-scope.js";
 import type {
-  ExcerptExtractionResult,
+  NormalizedConversationEvent,
+  ProviderDescriptor,
   ProviderDiscoveryContext,
   ProviderDiscoveryResult,
   ProviderSession,
+  RawExcerptCandidate,
   SessionProviderAdapter,
 } from "./types.js";
 
@@ -84,8 +85,8 @@ function warning(
 
 /**
  * Claude Code writes `~/.claude/projects/<encoded-cwd>/<session-uuid>.jsonl`,
- * encoding the working directory by replacing every run of non
- * alphanumeric characters with a single "-". That encoding is lossy and
+ * encoding the working directory by replacing each non-alphanumeric
+ * character with a "-". That encoding is lossy and
  * case-sensitive project directories are common (the same repository
  * scanned from two differently-cased paths produces two directories), so it
  * is used only as a cheap, case-insensitive prefix filter over candidate
@@ -94,7 +95,10 @@ function warning(
  */
 function encodedDirectoryPrefix(repositoryRoot: string): string {
   const normalized = path.resolve(repositoryRoot);
-  return normalized.replaceAll(/[^A-Za-z0-9]+/g, "-").toLocaleLowerCase("en-US");
+  // Claude replaces each non-alphanumeric character independently. This is
+  // intentionally not a `+` run: on Windows `D:\\Vibe social` becomes
+  // `D--Vibe-social` (`:` and `\\` each contribute one dash).
+  return normalized.replaceAll(/[^A-Za-z0-9]/g, "-").toLocaleLowerCase("en-US");
 }
 
 async function discoverProjectDirectories(root: string, prefix: string): Promise<{ dirs: string[]; available: boolean }> {
@@ -466,6 +470,13 @@ export interface ClaudeCodeAdapterOptions {
 export class ClaudeCodeSessionAdapter implements SessionProviderAdapter {
   public readonly provider = "claude-code" as const;
   public readonly sessionFormat = "claude-code-jsonl" as const;
+  public readonly descriptor: ProviderDescriptor = {
+    id: "claude-code",
+    displayName: "Claude Code",
+    sessionFormat: "claude-code-jsonl",
+    capabilities: { metadata: true, narrativeEvidence: true },
+    formatVersions: ["claude-code-jsonl-v1"],
+  };
   private readonly projectsRoot: string;
   private readonly kind: SourceKind;
 
@@ -538,155 +549,138 @@ export class ClaudeCodeSessionAdapter implements SessionProviderAdapter {
     };
   }
 
-  public async extractExcerpts(
-    sessions: ProviderSession[],
-    redactor: Redactor,
-    budget: { maxExcerpts: number; maxCharsPerExcerpt: number; maxTotalChars: number },
-  ): Promise<ExcerptExtractionResult> {
-    return extractClaudeCodeExcerpts(sessions, redactor, budget);
-  }
-}
+  // --- Opt-in narrative-evidence: shared-shape read + provider recognition -
+  // A second, separate pass over an already-matched session file. Never
+  // invoked by discover()/buildProjectSnapshot(); only reachable through the
+  // shared selector's own excerpts pass, which requires its own consent and
+  // a typed --review confirmation. Keeping this fully separate from the main
+  // scan path means the default scan stays exactly as content-free as
+  // before this file existed.
 
-// --- Opt-in narrative-evidence excerpt extraction --------------------------
-// A second, separate pass over already-matched session files. Never invoked
-// by discover()/buildProjectSnapshot(); only reachable through the explicit
-// excerpts CLI flow, which requires its own consent and a typed --review
-// confirmation. Keeping this fully separate from the main scan path means
-// the default scan stays exactly as content-free as before this file existed.
+  public async readEvents(
+    session: ProviderSession,
+    _context: ProviderDiscoveryContext,
+  ): Promise<NormalizedConversationEvent[]> {
+    if (!session.sourceFilePath) return [];
+    const sessionRef = session.summary.sessionRef;
+    const events: NormalizedConversationEvent[] = [];
+    let ordinal = 0;
+    let sawTitle = false;
 
-const MAX_EXCERPTS_PER_SESSION = 6;
-const MAX_ASSISTANT_DECISIONS_PER_SESSION = 3;
-const ASSISTANT_DECISION_MAX_RAW_CHARS = 600;
+    await consumeJsonLines(session.sourceFilePath, (line) => {
+      let record: JsonRecord;
+      try {
+        const parsed: unknown = JSON.parse(line.toString("utf8"));
+        if (!isRecord(parsed)) return true;
+        record = parsed;
+      } catch {
+        return true;
+      }
+      const timestamp = isoTimestamp(record.timestamp) ?? new Date(0).toISOString();
+      const recordType = asString(record.type);
 
-interface RawExcerptCandidate {
-  sessionRef: string;
-  occurredAt: string;
-  role: "session-title" | "user-intent" | "plan-transition" | "assistant-decision" | "outcome";
-  text: string;
-}
+      if ((recordType === "custom-title" || recordType === "ai-title") && !sawTitle) {
+        const text = asString(recordType === "custom-title" ? record.customTitle : record.aiTitle);
+        if (text) {
+          sawTitle = true;
+          ordinal += 1;
+          events.push({ provider: "claude-code", sessionRef, ordinal, occurredAt: timestamp, role: "system", text, eventKind: "title" });
+        }
+        return true;
+      }
 
-async function collectRawCandidates(filePath: string, sessionRef: string): Promise<RawExcerptCandidate[]> {
-  const candidates: RawExcerptCandidate[] = [];
-  let sessionTitle: { text: string; occurredAt: string } | null = null;
-  let firstUserMessage: { text: string; occurredAt: string } | null = null;
-  let lastUserMessage: { text: string; occurredAt: string } | null = null;
-  let lastPermissionMode: string | null = null;
-  let pendingAssistantText: { text: string; occurredAt: string } | null = null;
-  let assistantDecisions = 0;
+      if (recordType !== "user" && recordType !== "assistant") return true;
+      if (record.isSidechain === true) return true;
+      const message = asRecord(record.message);
+      if (!message) return true;
 
-  await consumeJsonLines(filePath, (line) => {
-    let record: JsonRecord;
-    try {
-      const parsed: unknown = JSON.parse(line.toString("utf8"));
-      if (!isRecord(parsed)) return true;
-      record = parsed;
-    } catch {
+      if (recordType === "user") {
+        const content = message.content;
+        if (isToolResultContinuation(content)) return true;
+        const text = typeof content === "string" ? content : null;
+        if (!text) return true;
+        ordinal += 1;
+        const permissionMode = asString(record.permissionMode);
+        events.push({
+          provider: "claude-code",
+          sessionRef,
+          ordinal,
+          occurredAt: timestamp,
+          role: "user",
+          text,
+          eventKind: "message",
+          ...(permissionMode ? { permissionMode } : {}),
+        });
+        return true;
+      }
+
+      // assistant
+      const content = Array.isArray(message.content) ? message.content : [];
+      const textBlock = content.find((block): block is JsonRecord => isRecord(block) && block.type === "text");
+      const rawText = textBlock ? asString(textBlock.text) : null;
+      if (rawText) {
+        ordinal += 1;
+        events.push({ provider: "claude-code", sessionRef, ordinal, occurredAt: timestamp, role: "assistant", text: rawText, eventKind: "message" });
+      }
+      for (const block of content) {
+        if (isRecord(block) && block.type === "tool_use") {
+          ordinal += 1;
+          events.push({
+            provider: "claude-code",
+            sessionRef,
+            ordinal,
+            occurredAt: timestamp,
+            role: "assistant",
+            text: null,
+            eventKind: "tool-call",
+            toolName: asString(block.name) ?? "unknown-tool",
+          });
+        }
+      }
       return true;
-    }
-    const timestamp = isoTimestamp(record.timestamp) ?? new Date(0).toISOString();
-    const recordType = asString(record.type);
+    });
 
-    if ((recordType === "custom-title" || recordType === "ai-title") && !sessionTitle) {
-      const text = asString(recordType === "custom-title" ? record.customTitle : record.aiTitle);
-      if (text) sessionTitle = { text, occurredAt: timestamp };
-      return true;
-    }
-
-    if (recordType !== "user" && recordType !== "assistant") return true;
-    if (record.isSidechain === true) return true;
-    const message = asRecord(record.message);
-    if (!message) return true;
-
-    if (recordType === "user") {
-      const content = message.content;
-      if (isToolResultContinuation(content)) return true;
-      const text = typeof content === "string" ? content : null;
-      if (!text) return true;
-      const permissionMode = asString(record.permissionMode);
-      if (permissionMode && lastPermissionMode !== null && permissionMode !== lastPermissionMode) {
-        candidates.push({ sessionRef, occurredAt: timestamp, role: "plan-transition", text });
-      }
-      if (permissionMode) lastPermissionMode = permissionMode;
-      if (!firstUserMessage) firstUserMessage = { text, occurredAt: timestamp };
-      lastUserMessage = { text, occurredAt: timestamp };
-      pendingAssistantText = null; // a new user turn closes the window for a pre-edit assistant statement
-      return true;
-    }
-
-    // assistant
-    const content = Array.isArray(message.content) ? message.content : [];
-    const textBlock = content.find((block): block is JsonRecord => isRecord(block) && block.type === "text");
-    const rawText = textBlock ? asString(textBlock.text) : null;
-    if (rawText && rawText.length <= ASSISTANT_DECISION_MAX_RAW_CHARS) {
-      pendingAssistantText = { text: rawText, occurredAt: timestamp };
-    }
-    const hasEditOrWrite = content.some(
-      (block) => isRecord(block) && block.type === "tool_use" && (block.name === "Edit" || block.name === "Write"),
-    );
-    if (hasEditOrWrite && pendingAssistantText && assistantDecisions < MAX_ASSISTANT_DECISIONS_PER_SESSION) {
-      candidates.push({ sessionRef, ...pendingAssistantText, role: "assistant-decision" });
-      assistantDecisions += 1;
-      pendingAssistantText = null;
-    }
-    return true;
-  });
-
-  const ordered: RawExcerptCandidate[] = [];
-  const title = sessionTitle as { text: string; occurredAt: string } | null;
-  const firstUser = firstUserMessage as { text: string; occurredAt: string } | null;
-  const lastUser = lastUserMessage as { text: string; occurredAt: string } | null;
-  if (title) ordered.push({ sessionRef, role: "session-title", ...title });
-  if (firstUser) ordered.push({ sessionRef, role: "user-intent", ...firstUser });
-  ordered.push(...candidates);
-  // Skip "outcome" if the same text is already captured under another role
-  // (e.g. the last user turn is also the message that triggered a
-  // plan-transition candidate) - the same excerpt shouldn't consume the
-  // budget twice just because it earned two labels.
-  if (lastUser && lastUser !== firstUser && !ordered.some((entry) => entry.text === lastUser.text)) {
-    ordered.push({ sessionRef, role: "outcome", ...lastUser });
-  }
-  return ordered.slice(0, MAX_EXCERPTS_PER_SESSION);
-}
-
-export async function extractClaudeCodeExcerpts(
-  sessions: ProviderSession[],
-  redactor: Redactor,
-  budget: { maxExcerpts: number; maxCharsPerExcerpt: number; maxTotalChars: number },
-): Promise<{ excerpts: NarrativeExcerpt[]; candidates: number; rejectedByRedaction: number; rejectedByBudget: number }> {
-  const excerpts: NarrativeExcerpt[] = [];
-  let candidateCount = 0;
-  let rejectedByRedaction = 0;
-  let rejectedByBudget = 0;
-  let totalChars = 0;
-
-  for (const session of sessions) {
-    if (!session.sourceFilePath) continue;
-    const raw = await collectRawCandidates(session.sourceFilePath, session.summary.sessionRef);
-    for (const candidate of raw) {
-      candidateCount += 1;
-      if (excerpts.length >= budget.maxExcerpts) {
-        rejectedByBudget += 1;
-        continue;
-      }
-      const cleaned = redactor.cleanExcerpt(candidate.text, budget.maxCharsPerExcerpt);
-      if (cleaned === null) {
-        rejectedByRedaction += 1;
-        continue;
-      }
-      if (totalChars + cleaned.length > budget.maxTotalChars) {
-        rejectedByBudget += 1;
-        continue;
-      }
-      totalChars += cleaned.length;
-      excerpts.push({
-        excerptId: `exc_${shortHash(`${candidate.sessionRef}\0${candidate.role}\0${candidate.occurredAt}\0${excerpts.length}`, 20)}`,
-        sessionRef: candidate.sessionRef,
-        occurredAt: candidate.occurredAt,
-        role: candidate.role,
-        text: cleaned,
-      });
-    }
+    return events;
   }
 
-  return { excerpts, candidates: candidateCount, rejectedByRedaction, rejectedByBudget };
+  public extractCandidates(sessionRef: string, events: NormalizedConversationEvent[]): RawExcerptCandidate[] {
+    let sessionTitle: { text: string; occurredAt: string } | null = null;
+    let firstUser: { text: string; occurredAt: string } | null = null;
+    let lastUser: { text: string; occurredAt: string } | null = null;
+    let lastPermissionMode: string | null = null;
+    let pendingAssistantText: { text: string; occurredAt: string } | null = null;
+    let assistantDecisions = 0;
+    const turningPoints: RawExcerptCandidate[] = [];
+
+    for (const event of events) {
+      if (event.eventKind === "title") {
+        if (!sessionTitle && event.text) sessionTitle = { text: event.text, occurredAt: event.occurredAt };
+        continue;
+      }
+      if (event.role === "user" && event.eventKind === "message" && event.text) {
+        if (event.permissionMode && lastPermissionMode !== null && event.permissionMode !== lastPermissionMode) {
+          turningPoints.push({ sessionRef, occurredAt: event.occurredAt, role: "plan-transition", text: event.text });
+        }
+        if (event.permissionMode) lastPermissionMode = event.permissionMode;
+        if (!firstUser) firstUser = { text: event.text, occurredAt: event.occurredAt };
+        lastUser = { text: event.text, occurredAt: event.occurredAt };
+        pendingAssistantText = null; // a new user turn closes the window for a pre-edit assistant statement
+        continue;
+      }
+      if (event.role === "assistant" && event.eventKind === "message" && event.text && event.text.length <= ASSISTANT_DECISION_MAX_RAW_CHARS) {
+        pendingAssistantText = { text: event.text, occurredAt: event.occurredAt };
+        continue;
+      }
+      if (event.role === "assistant" && event.eventKind === "tool-call") {
+        const isEditOrWrite = event.toolName === "Edit" || event.toolName === "Write";
+        if (isEditOrWrite && pendingAssistantText && assistantDecisions < MAX_ASSISTANT_DECISIONS_PER_SESSION) {
+          turningPoints.push({ sessionRef, ...pendingAssistantText, role: "assistant-decision" });
+          assistantDecisions += 1;
+          pendingAssistantText = null;
+        }
+      }
+    }
+
+    return orderSessionCandidates(sessionRef, { sessionTitle, firstUser, lastUser, turningPoints });
+  }
 }

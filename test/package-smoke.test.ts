@@ -86,7 +86,7 @@ test("locally packed install exposes the advertised buildstory command", { timeo
     await access(path.join(binDirectory, process.platform === "win32" ? "story-scanner.cmd" : "story-scanner"));
     const version = await runInstalledBuildStory(binDirectory, ["--version"]);
     assert.equal(version.exitCode, 0, version.stderr);
-    assert.equal(version.stdout.trim(), "0.3.0");
+    assert.equal(version.stdout.trim(), "0.6.0");
 
     const mockConnect = await runInstalledBuildStory(binDirectory, [
       "connect", "session-smoke-001", "--code", "DEVICE-CODE-001", "--api-base-url", "mock://local",
