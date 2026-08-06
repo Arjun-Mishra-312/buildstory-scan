@@ -60,7 +60,7 @@ Commands are deliberately separated:
 
 ## Determinism and schema sharing
 
-Files, sessions, warnings, tools, models, milestones, evidence, object keys, and Git provenance labels are sorted. Default time bounds derive from repository/session state, not wall clock. JSON keys use locale-independent lexicographic ordering. The current transport schema is `ProjectSnapshot 1.5.0`; the web app keeps frozen 1.3.0 and 1.2.0 validators for rollout compatibility. Scores are recomputed server-side from uploaded metrics; the scanner computes the same pure functions only to prompt local prose. The optional `timeWindow.utcOffsetMinutes` makes peak-hour analysis local-time aware without collecting a location name.
+Files, sessions, warnings, tools, models, milestones, evidence, object keys, and Git provenance labels are sorted. Default time bounds derive from repository/session state, not wall clock. JSON keys use locale-independent lexicographic ordering. The current transport schema is `ProjectSnapshot 1.6.0`; the web app keeps frozen 1.3.0 and 1.2.0 validators for rollout compatibility. Scores are recomputed server-side from uploaded metrics; the scanner computes the same pure functions only to prompt local prose. The optional `timeWindow.utcOffsetMinutes` makes peak-hour analysis local-time aware without collecting a location name.
 
 The web app can import TypeScript exports from `@buildstory/scanner` and the portable schema from `@buildstory/scanner/schema`. The schema has no remote-host field and uses `additionalProperties: false` recursively.
 

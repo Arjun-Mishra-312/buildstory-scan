@@ -1,10 +1,14 @@
 import assert from "node:assert/strict";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 import { canonicalJson } from "../src/canonical-json.js";
+import { SESSION_PRICING_TABLE_VERSION } from "../src/session-pricing.js";
 import { buildProjectSnapshot } from "../src/scanner.js";
 import { createOllamaNarrativeGenerator } from "../src/narrative/local.js";
 import { validateProjectSnapshot } from "../src/validation.js";
-import { createLocalFixture } from "./helpers.js";
+import { createLocalFixture, encodedClaudeCodeProjectDirectory } from "./helpers.js";
 
 test("builds a deterministic, repository-scoped ProjectSnapshot from Claude Code transcripts", async () => {
   const fixture = await createLocalFixture();
@@ -60,6 +64,23 @@ test("builds a deterministic, repository-scoped ProjectSnapshot from Claude Code
     assert.equal(usage.cacheReadInputTokens, 13); // 5 + 8
     assert.equal(usage.cachedInputTokens, 0); // no OpenAI-style cached-subset concept for this provider
     assert.equal(usage.totalTokens, 233);
+
+    // Single model across the whole session (main + subagent): per-model
+    // tokenUsage in usage.models must equal the session-wide total exactly.
+    assert.equal(first.usage.models.length, 1);
+    const modelUsage = first.usage.models[0];
+    assert.ok(modelUsage);
+    assert.equal(modelUsage.name, "claude-fixture");
+    assert.deepEqual(modelUsage.tokenUsage, usage);
+    // "claude-fixture" is a synthetic name, deliberately absent from the
+    // static pricing table - cost must be null, never a guessed number.
+    assert.equal(modelUsage.costMicroUsd, null);
+    assert.deepEqual(first.usage.cost, {
+      totalMicroUsd: null,
+      pricedTokens: 0,
+      unpricedTokens: 233,
+      pricingTableVersion: SESSION_PRICING_TABLE_VERSION,
+    });
 
     assert.equal(first.provenance.sessionFormats.includes("claude-code-jsonl"), true);
     assert.deepEqual(first.sourceSelection.providers[0]?.provider, "claude-code");
@@ -256,5 +277,104 @@ test("the Ollama generator uses only loopback HTTP and splits narrative/profile 
     if (originalBaseUrl === undefined) delete process.env.BUILDSTORY_OLLAMA_BASE_URL;
     else process.env.BUILDSTORY_OLLAMA_BASE_URL = originalBaseUrl;
     await fixture.cleanup();
+  }
+});
+
+test("a session that switches Claude models attributes tokens and cost to each model exactly", async () => {
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const execFileAsync = promisify(execFile);
+  const root = await mkdtemp(path.join(os.tmpdir(), "story-scanner-multimodel-"));
+  try {
+    const repository = path.join(root, "repo");
+    const claudeCodeHome = path.join(root, "claude-code-home");
+    const projectDirectory = path.join(claudeCodeHome, "projects", encodedClaudeCodeProjectDirectory(repository));
+    await mkdir(repository, { recursive: true });
+    await mkdir(projectDirectory, { recursive: true });
+    const git = (args: string[], env: NodeJS.ProcessEnv = {}) =>
+      execFileAsync("git", ["-C", repository, ...args], { windowsHide: true, env: { ...process.env, ...env } });
+    await git(["init", "--quiet"]);
+    await git(["config", "user.name", "Fixture Builder"]);
+    await git(["config", "user.email", "fixture@example.invalid"]);
+
+    const sessionId = "multimodel-session";
+    const records = [
+      {
+        type: "user",
+        sessionId,
+        cwd: repository,
+        timestamp: "2026-08-03T10:00:00Z",
+        message: { role: "user", content: "first turn" },
+      },
+      {
+        type: "assistant",
+        sessionId,
+        cwd: repository,
+        timestamp: "2026-08-03T10:00:01Z",
+        message: {
+          role: "assistant",
+          model: "claude-sonnet-4-5-20250929",
+          stop_reason: "end_turn",
+          content: [{ type: "text", text: "sonnet reply" }],
+          usage: { input_tokens: 1_000_000, output_tokens: 1_000_000 },
+        },
+      },
+      {
+        type: "user",
+        sessionId,
+        cwd: repository,
+        timestamp: "2026-08-03T10:00:02Z",
+        message: { role: "user", content: "second turn" },
+      },
+      {
+        type: "assistant",
+        sessionId,
+        cwd: repository,
+        timestamp: "2026-08-03T10:00:03Z",
+        message: {
+          role: "assistant",
+          model: "claude-opus-4-1-20250805",
+          stop_reason: "end_turn",
+          content: [{ type: "text", text: "opus reply" }],
+          usage: { input_tokens: 2_000_000, output_tokens: 2_000_000 },
+        },
+      },
+    ];
+    await writeFile(
+      path.join(projectDirectory, `${sessionId}.jsonl`),
+      `${records.map((record) => JSON.stringify(record)).join("\n")}\n`,
+      "utf8",
+    );
+
+    const snapshot = await buildProjectSnapshot({
+      repositoryPath: repository,
+      consent: "local-scan",
+      providers: ["claude-code"],
+      claudeCodeHome,
+      since: "2026-08-03T00:00:00Z",
+      until: "2026-08-04T00:00:00Z",
+    });
+    validateProjectSnapshot(snapshot);
+
+    const byName = new Map(snapshot.usage.models.map((model) => [model.name, model]));
+    const sonnet = byName.get("claude-sonnet-4-5-20250929");
+    const opus = byName.get("claude-opus-4-1-20250805");
+    assert.ok(sonnet);
+    assert.ok(opus);
+
+    // Each model's tokens are exactly its own message's usage, not blended
+    // with the other model's - and priced at that model's own rate.
+    assert.equal(sonnet.tokenUsage?.inputTokens, 1_000_000);
+    assert.equal(sonnet.tokenUsage?.outputTokens, 1_000_000);
+    assert.equal(sonnet.costMicroUsd, 1_000_000 * 3 + 1_000_000 * 15); // claude-sonnet: $3/$15 per M
+
+    assert.equal(opus.tokenUsage?.inputTokens, 2_000_000);
+    assert.equal(opus.tokenUsage?.outputTokens, 2_000_000);
+    assert.equal(opus.costMicroUsd, 2_000_000 * 15 + 2_000_000 * 75); // claude-opus: $15/$75 per M
+
+    assert.equal(snapshot.usage.cost.totalMicroUsd, sonnet.costMicroUsd! + opus.costMicroUsd!);
+    assert.equal(snapshot.usage.cost.unpricedTokens, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });

@@ -5,7 +5,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { canonicalJson } from "./canonical-json.js";
 import { connectBuildStory } from "./connect.js";
-import type { ProviderId } from "./contract.js";
+import type { ProjectSnapshot, ProviderId } from "./contract.js";
 import { PROJECT_SNAPSHOT_SCHEMA_VERSION, SCANNER_VERSION } from "./contract.js";
 import { getStoredUploadGrant } from "./connection-state.js";
 import { ScannerError, safeErrorMessage } from "./errors.js";
@@ -17,6 +17,28 @@ import { inspectRepository } from "./repository.js";
 import { buildProjectSnapshot, inspectSelectedRepository, providerLabel } from "./scanner.js";
 import { isRegisteredProvider, REGISTERED_PROVIDER_IDS } from "./sources/registry.js";
 import type { ScanProgressEvent, ScanProgressReporter } from "./progress.js";
+
+const TOKEN_MAGNITUDES: ReadonlyArray<readonly [number, string]> = [
+  [1_000_000_000, "B"],
+  [1_000_000, "M"],
+  [1_000, "K"],
+];
+
+function compactTokenCount(total: number): string {
+  for (const [threshold, suffix] of TOKEN_MAGNITUDES) {
+    if (total >= threshold) return `${(total / threshold).toFixed(1)}${suffix}`;
+  }
+  return String(total);
+}
+
+/** ", 12.3K tokens, est. $4.82" - empty when the snapshot has no token usage to report. */
+function usageSummarySuffix(snapshot: ProjectSnapshot): string {
+  const tokens = snapshot.usage.tokenUsage;
+  if (!tokens || tokens.totalTokens === 0) return "";
+  const totalMicroUsd = snapshot.usage.cost.totalMicroUsd;
+  const costSuffix = totalMicroUsd === null ? "" : `, est. $${(totalMicroUsd / 1_000_000).toFixed(2)}`;
+  return `, ${compactTokenCount(tokens.totalTokens)} tokens${costSuffix}`;
+}
 
 /** The canonical hosted origin --remote expands to; kept separate from user input so it is never itself an injectable value. */
 const DEFAULT_REMOTE_API_BASE_URL = "https://buildstory.dev/";
@@ -702,7 +724,7 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
     progress.stop();
     if (!parsed.quiet) {
       process.stdout.write(
-        `Validated and uploaded ProjectSnapshot ${snapshot.schemaVersion}: ${receipt.payloadBytes} bytes, ${snapshot.sessions.length} sessions, ${snapshot.git.commits} commits, ${snapshot.quality.warningCount} warnings.\n`,
+        `Validated and uploaded ProjectSnapshot ${snapshot.schemaVersion}: ${receipt.payloadBytes} bytes, ${snapshot.sessions.length} sessions, ${snapshot.git.commits} commits, ${snapshot.quality.warningCount} warnings${usageSummarySuffix(snapshot)}.\n`,
       );
       process.stdout.write(
         "Local dashboard accepted the one-PUT snapshot. Run buildstory status for authenticated read-only status/report updates until the credential expires.\n",
@@ -723,7 +745,7 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
     overwrite: parsed.overwrite,
   });
   if (!parsed.quiet) {
-    process.stdout.write(`Wrote ${snapshot.schemaVersion} snapshot ${snapshot.scanId} to ${writtenPath}\n`);
+    process.stdout.write(`Wrote ${snapshot.schemaVersion} snapshot ${snapshot.scanId} to ${writtenPath}${usageSummarySuffix(snapshot)}\n`);
   }
   return 0;
   } catch (error) {

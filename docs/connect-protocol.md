@@ -22,7 +22,7 @@ The protocol version remains 1.0. New CLIs add an optional capability inside the
     "version": "0.4.0"
   },
   "capabilities": {
-    "projectSnapshotSchemaVersions": ["1.5.0"],
+    "projectSnapshotSchemaVersions": ["1.6.0"],
     "snapshotUpload": false,
     "narrativeModes": ["local", "cloud", "off"]
   }
@@ -45,7 +45,7 @@ Success is HTTP 2xx and this strict JSON object, no larger than 64 KiB:
     "bearerToken": "SHORT_LIVED_ONE_USE_VALUE",
     "snapshotEndpoint": "/api/v1/cli/snapshots/OPAQUE_ID",
     "expiresAt": "2026-08-04T12:05:00.000Z",
-    "schemaVersion": "1.5.0",
+    "schemaVersion": "1.6.0",
     "maxBytes": 1048576
   },
   "narrative": { "mode": "local", "model": "gemma4:12b" }
@@ -61,7 +61,7 @@ enforce the mode without trusting command-line flags.
 The upload-session ID and protocol must match the request. `connectionId` is validated but never printed or persisted. The grant must:
 
 - expire in the future and no more than one hour after acceptance;
-- bind to `ProjectSnapshot 1.5.0`;
+- bind to `ProjectSnapshot 1.6.0`;
 - cap the body between 1 byte and the CLI's 8 MiB hard maximum;
 - provide a relative or absolute snapshot endpoint that resolves to the same origin as the explicit API base;
 - carry a non-empty bearer with no whitespace or control characters.

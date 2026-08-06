@@ -13,6 +13,7 @@ import { ASSISTANT_DECISION_MAX_RAW_CHARS, MAX_ASSISTANT_DECISIONS_PER_SESSION, 
 import { consumeJsonLines } from "./jsonl.js";
 import { relationToRepository } from "./path-scope.js";
 import type {
+  ModelCounts,
   NormalizedConversationEvent,
   ProviderDescriptor,
   ProviderDiscoveryContext,
@@ -136,7 +137,7 @@ async function parseCodexFile(
   let responseAssistantMessages = 0;
   let latestTokenUsage: TokenUsage | null = null;
   const toolCounts = new Map<string, number>();
-  const modelCounts = new Map<string, { provider: string; turns: number }>();
+  const modelCounts: ModelCounts = new Map();
 
   const result = await consumeJsonLines(located.filePath, (line, ordinal) => {
     let record: JsonRecord;
@@ -191,7 +192,7 @@ async function parseCodexFile(
         const model = context.redactor.cleanMetadata(rawModel, 160);
         const provider = context.redactor.cleanMetadata(providerName, 80);
         const existing = modelCounts.get(model);
-        modelCounts.set(model, { provider, turns: (existing?.turns ?? 0) + 1 });
+        modelCounts.set(model, { provider, turns: (existing?.turns ?? 0) + 1, tokenUsage: existing?.tokenUsage ?? null });
       }
     }
 
@@ -274,6 +275,18 @@ async function parseCodexFile(
 
   if (modelCounts.size === 0) {
     warnings.push(warning("SESSION_MODEL_UNKNOWN", "info", "No model identifier was present in the session metadata.", sessionRef));
+  }
+  // Codex's token_count events are a cumulative session-wide snapshot, never
+  // tied to a specific model event, so a session's tokens can only be
+  // attributed to one model: whichever had the most turns (alphabetical
+  // tie-break for determinism). Sessions that never switch models - the
+  // common case - are exact; only multi-model sessions are approximated.
+  if (latestTokenUsage && modelCounts.size > 0) {
+    const [dominantModel] = [...modelCounts.entries()].sort(
+      (left, right) => right[1].turns - left[1].turns || compareStrings(left[0], right[0]),
+    )[0]!;
+    const dominant = modelCounts.get(dominantModel)!;
+    modelCounts.set(dominantModel, { ...dominant, tokenUsage: latestTokenUsage });
   }
   const status: SessionStatus = aborted ? "aborted" : completed ? "completed" : "incomplete";
   if (status === "incomplete" && located.kind === "active") {

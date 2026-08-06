@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://story-scanner.local/schemas/project-snapshot-1.5.0.json",
+  "$id": "https://story-scanner.local/schemas/project-snapshot-1.6.0.json",
   "title": "ProjectSnapshot",
   "description": "Privacy-preserving aggregate of repository and AI coding-session activity. Transcript bodies, tool payloads, paths, diffs, and source text are intentionally not representable.",
   "type": "object",
@@ -22,7 +22,7 @@
     "quality"
   ],
   "properties": {
-    "schemaVersion": { "const": "1.5.0" },
+    "schemaVersion": { "const": "1.6.0" },
     "scanId": { "type": "string", "pattern": "^scan_[a-f0-9]{24}$" },
     "generatedAt": { "$ref": "#/$defs/dateTime" },
     "sourceSelection": { "$ref": "#/$defs/sourceSelection" },
@@ -248,7 +248,19 @@
               "provider": { "type": "string", "minLength": 1, "maxLength": 80 },
               "name": { "type": "string", "minLength": 1, "maxLength": 160 },
               "turnCount": { "$ref": "#/$defs/nonNegativeInteger" },
-              "sessionCount": { "$ref": "#/$defs/nonNegativeInteger" }
+              "sessionCount": { "$ref": "#/$defs/nonNegativeInteger" },
+              "tokenUsage": {
+                "anyOf": [
+                  { "$ref": "#/$defs/tokenUsage" },
+                  { "type": "null" }
+                ]
+              },
+              "costMicroUsd": {
+                "anyOf": [
+                  { "$ref": "#/$defs/nonNegativeInteger" },
+                  { "type": "null" }
+                ]
+              }
             }
           }
         },
@@ -259,6 +271,22 @@
             { "$ref": "#/$defs/tokenUsage" },
             { "type": "null" }
           ]
+        },
+        "cost": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["totalMicroUsd", "pricedTokens", "unpricedTokens", "pricingTableVersion"],
+          "properties": {
+            "totalMicroUsd": {
+              "anyOf": [
+                { "$ref": "#/$defs/nonNegativeInteger" },
+                { "type": "null" }
+              ]
+            },
+            "pricedTokens": { "$ref": "#/$defs/nonNegativeInteger" },
+            "unpricedTokens": { "$ref": "#/$defs/nonNegativeInteger" },
+            "pricingTableVersion": { "type": "string", "minLength": 1, "maxLength": 40 }
+          }
         }
       }
     },

@@ -1,5 +1,5 @@
 {
-  "schemaVersion": "1.5.0",
+  "schemaVersion": "1.6.0",
   "scanId": "scan_0123456789abcdef01234567",
   "generatedAt": "2026-08-03T12:00:00.000Z",
   "sourceSelection": {
@@ -89,7 +89,15 @@
         "provider": "openai",
         "name": "example-model",
         "turnCount": 3,
-        "sessionCount": 1
+        "sessionCount": 1,
+        "tokenUsage": {
+          "inputTokens": 1000,
+          "cachedInputTokens": 200,
+          "outputTokens": 400,
+          "reasoningOutputTokens": 80,
+          "totalTokens": 1400
+        },
+        "costMicroUsd": null
       }
     ],
     "totalToolCalls": 5,
@@ -100,6 +108,12 @@
       "outputTokens": 400,
       "reasoningOutputTokens": 80,
       "totalTokens": 1400
+    },
+    "cost": {
+      "totalMicroUsd": null,
+      "pricedTokens": 0,
+      "unpricedTokens": 1400,
+      "pricingTableVersion": "2026-08-05.1"
     }
   },
   "git": {

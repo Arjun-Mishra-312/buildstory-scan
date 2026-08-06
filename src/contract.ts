@@ -1,6 +1,6 @@
 /** Portable TypeScript mirror of schema/project-snapshot.schema.json. */
 
-export const PROJECT_SNAPSHOT_SCHEMA_VERSION = "1.5.0" as const;
+export const PROJECT_SNAPSHOT_SCHEMA_VERSION = "1.6.0" as const;
 export const SCANNER_NAME = "buildstory" as const;
 export const SCANNER_VERSION = "0.6.0" as const;
 export const CONSENT_STATEMENT_VERSION = "1.0" as const;
@@ -284,10 +284,31 @@ export interface UsageSummary {
     name: string;
     turnCount: number;
     sessionCount: number;
+    /**
+     * Exact for Claude Code (model and usage co-occur on every assistant
+     * message); a session-level approximation for Codex, whose token_count
+     * events are a cumulative snapshot not tied to a specific model event
+     * (see assumptionsForProviders). Null where no session reported usage.
+     */
+    tokenUsage: TokenUsage | null;
+    /** Null when `name` isn't in the static session-pricing table — never a fabricated price. */
+    costMicroUsd: number | null;
   }>;
   totalToolCalls: number;
   totalTurns: number;
   tokenUsage: TokenUsage | null;
+  /** Aggregate cost roll-up across every priced model; see session-pricing.ts. */
+  cost: UsageCostSummary;
+}
+
+export interface UsageCostSummary {
+  /** Null only when zero models in this snapshot are in the pricing table. */
+  totalMicroUsd: number | null;
+  /** Total tokens (across all token kinds) belonging to a priced model. */
+  pricedTokens: number;
+  /** Total tokens belonging to a model absent from the pricing table. */
+  unpricedTokens: number;
+  pricingTableVersion: string;
 }
 
 export interface GitAggregateMetrics {

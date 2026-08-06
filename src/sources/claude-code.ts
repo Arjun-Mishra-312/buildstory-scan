@@ -13,6 +13,7 @@ import { ASSISTANT_DECISION_MAX_RAW_CHARS, MAX_ASSISTANT_DECISIONS_PER_SESSION, 
 import { consumeJsonLines } from "./jsonl.js";
 import { relationToRepository } from "./path-scope.js";
 import type {
+  ModelCounts,
   NormalizedConversationEvent,
   ProviderDescriptor,
   ProviderDiscoveryContext,
@@ -195,6 +196,26 @@ function parseTokenUsage(usage: JsonRecord | null): TokenUsage | null {
   };
 }
 
+function addModelTokenUsage(modelCounts: ModelCounts, provider: string, model: string, usage: TokenUsage | null): void {
+  const existing = modelCounts.get(model);
+  modelCounts.set(model, {
+    provider,
+    turns: (existing?.turns ?? 0) + 1,
+    tokenUsage: addTokenUsage(existing?.tokenUsage ?? null, usage),
+  });
+}
+
+function mergeModelCounts(target: ModelCounts, source: ModelCounts): void {
+  for (const [model, value] of source) {
+    const existing = target.get(model);
+    target.set(model, {
+      provider: value.provider,
+      turns: (existing?.turns ?? 0) + value.turns,
+      tokenUsage: addTokenUsage(existing?.tokenUsage ?? null, value.tokenUsage),
+    });
+  }
+}
+
 function addTokenUsage(total: TokenUsage | null, addition: TokenUsage | null): TokenUsage | null {
   if (!addition) return total;
   if (!total) return addition;
@@ -220,10 +241,10 @@ function isToolResultContinuation(content: unknown): boolean {
 /** Sums assistant-message token usage and tool names from one transcript file (main or subagent). */
 async function parseUsageAndTools(
   filePath: string,
-): Promise<{ usage: TokenUsage | null; toolCounts: Map<string, number>; modelCounts: Map<string, { provider: string; turns: number }> }> {
+): Promise<{ usage: TokenUsage | null; toolCounts: Map<string, number>; modelCounts: ModelCounts }> {
   let usage: TokenUsage | null = null;
   const toolCounts = new Map<string, number>();
-  const modelCounts = new Map<string, { provider: string; turns: number }>();
+  const modelCounts: ModelCounts = new Map();
   await consumeJsonLines(filePath, (line) => {
     let record: JsonRecord;
     try {
@@ -236,12 +257,10 @@ async function parseUsageAndTools(
     if (record.type !== "assistant" || record.isSidechain === true) return true;
     const message = asRecord(record.message);
     if (!message) return true;
-    usage = addTokenUsage(usage, parseTokenUsage(asRecord(message.usage)));
+    const messageUsage = parseTokenUsage(asRecord(message.usage));
+    usage = addTokenUsage(usage, messageUsage);
     const model = asString(message.model);
-    if (model) {
-      const existing = modelCounts.get(model);
-      modelCounts.set(model, { provider: "anthropic", turns: (existing?.turns ?? 0) + 1 });
-    }
+    if (model) addModelTokenUsage(modelCounts, "anthropic", model, messageUsage);
     for (const block of Array.isArray(message.content) ? message.content : []) {
       if (isRecord(block) && block.type === "tool_use") {
         const name = asString(block.name) ?? "unknown-tool";
@@ -285,7 +304,7 @@ async function parseClaudeCodeFile(
   let lastAssistantStopReason: string | null = null;
   let tokenUsage: TokenUsage | null = null;
   const toolCounts = new Map<string, number>();
-  const modelCounts = new Map<string, { provider: string; turns: number }>();
+  const modelCounts: ModelCounts = new Map();
 
   const result = await consumeJsonLines(located.filePath, (line, ordinal) => {
     let record: JsonRecord;
@@ -337,12 +356,12 @@ async function parseClaudeCodeFile(
         const hasText = content.some((block) => isRecord(block) && block.type === "text");
         if (hasText) assistantMessages += 1;
         lastAssistantStopReason = asString(message.stop_reason);
-        tokenUsage = addTokenUsage(tokenUsage, parseTokenUsage(asRecord(message.usage)));
+        const messageUsage = parseTokenUsage(asRecord(message.usage));
+        tokenUsage = addTokenUsage(tokenUsage, messageUsage);
         const rawModel = asString(message.model);
         if (rawModel) {
           const model = context.redactor.cleanMetadata(rawModel, 160);
-          const existing = modelCounts.get(model);
-          modelCounts.set(model, { provider: "anthropic", turns: (existing?.turns ?? 0) + 1 });
+          addModelTokenUsage(modelCounts, "anthropic", model, messageUsage);
         } else {
           warnings.push(warning("SESSION_MODEL_UNKNOWN", "info", "No model identifier was present in an assistant message."));
         }
@@ -405,6 +424,7 @@ async function parseClaudeCodeFile(
   for (const subagentFile of await discoverSubagentFiles(located.filePath)) {
     const subagentResult = await parseUsageAndTools(subagentFile);
     tokenUsage = addTokenUsage(tokenUsage, subagentResult.usage);
+    mergeModelCounts(modelCounts, subagentResult.modelCounts);
     subagentInvocations += 1;
     const agentType = await subagentAgentType(subagentFile);
     addCount(toolCounts, `Agent:${context.redactor.cleanMetadata(agentType ?? "unknown", 80)}`);

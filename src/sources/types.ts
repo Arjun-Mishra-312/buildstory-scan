@@ -1,10 +1,17 @@
-import type { EvidenceReference, NarrativeExcerptRole, ProviderId, QualityWarning, SessionFormat, SessionSummary } from "../contract.js";
+import type { EvidenceReference, NarrativeExcerptRole, ProviderId, QualityWarning, SessionFormat, SessionSummary, TokenUsage } from "../contract.js";
 import type { Redactor } from "../redaction.js";
+
+/**
+ * tokenUsage is exact for Claude Code (model and usage co-occur per record)
+ * and a session-level approximation for Codex (attributed to the dominant
+ * model; token_count snapshots aren't tied to a specific model event).
+ */
+export type ModelCounts = Map<string, { provider: string; turns: number; tokenUsage: TokenUsage | null }>;
 
 export interface ProviderSession {
   summary: SessionSummary;
   toolCounts: Map<string, number>;
-  modelCounts: Map<string, { provider: string; turns: number }>;
+  modelCounts: ModelCounts;
   evidence: EvidenceReference[];
   /**
    * Absolute path to this session's own source file, kept only in-process

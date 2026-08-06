@@ -37,6 +37,7 @@ import { computeBuilderProfile, defaultProfileNarrative } from "./insights/profi
 import type { LocalNarrativeGenerator } from "./narrative/local.js";
 import type { ScanProgressReporter } from "./progress.js";
 import { createDefaultStoryPack, sanitizeStoryPack, sectionsFromStoryPack } from "./narrative/story-pack.js";
+import { estimateSessionCostMicroUsd, SESSION_PRICING_TABLE_VERSION } from "./session-pricing.js";
 
 const DEFAULT_LOOKBACK_MILLISECONDS = 30 * 24 * 60 * 60 * 1_000;
 const UNIX_EPOCH = "1970-01-01T00:00:00.000Z";
@@ -212,7 +213,7 @@ function safeSum(left: number, right: number): number {
 
 function aggregateUsage(sessions: ProviderSession[]): UsageSummary {
   const tools = new Map<string, { callCount: number; sessions: Set<string> }>();
-  const models = new Map<string, { provider: string; turnCount: number; sessions: Set<string> }>();
+  const models = new Map<string, { provider: string; turnCount: number; sessions: Set<string>; tokenUsage: TokenUsage[] }>();
   for (const session of sessions) {
     for (const [name, count] of session.toolCounts) {
       const aggregate = tools.get(name) ?? { callCount: 0, sessions: new Set<string>() };
@@ -222,28 +223,48 @@ function aggregateUsage(sessions: ProviderSession[]): UsageSummary {
     }
     for (const [name, model] of session.modelCounts) {
       const key = `${model.provider}\0${name}`;
-      const aggregate = models.get(key) ?? { provider: model.provider, turnCount: 0, sessions: new Set<string>() };
+      const aggregate = models.get(key) ?? { provider: model.provider, turnCount: 0, sessions: new Set<string>(), tokenUsage: [] };
       aggregate.turnCount += model.turns;
       aggregate.sessions.add(session.summary.sessionRef);
+      if (model.tokenUsage) aggregate.tokenUsage.push(model.tokenUsage);
       models.set(key, aggregate);
     }
   }
+
+  let totalMicroUsd: number | null = null;
+  let pricedTokens = 0;
+  let unpricedTokens = 0;
+  const modelEntries = [...models.entries()].map(([key, value]) => {
+    const name = key.slice(key.indexOf("\0") + 1);
+    const tokenUsage = sumTokens(value.tokenUsage);
+    const costMicroUsd = tokenUsage ? estimateSessionCostMicroUsd(name, tokenUsage) : null;
+    if (tokenUsage) {
+      if (costMicroUsd === null) {
+        unpricedTokens += tokenUsage.totalTokens;
+      } else {
+        pricedTokens += tokenUsage.totalTokens;
+        totalMicroUsd = (totalMicroUsd ?? 0) + costMicroUsd;
+      }
+    }
+    return {
+      provider: value.provider,
+      name,
+      turnCount: value.turnCount,
+      sessionCount: value.sessions.size,
+      tokenUsage,
+      costMicroUsd,
+    };
+  });
 
   return {
     tools: [...tools.entries()]
       .map(([name, value]) => ({ name, callCount: value.callCount, sessionCount: value.sessions.size }))
       .sort((left, right) => compareStrings(left.name, right.name)),
-    models: [...models.entries()]
-      .map(([key, value]) => ({
-        provider: value.provider,
-        name: key.slice(key.indexOf("\0") + 1),
-        turnCount: value.turnCount,
-        sessionCount: value.sessions.size,
-      }))
-      .sort((left, right) => compareStrings(left.provider, right.provider) || compareStrings(left.name, right.name)),
+    models: modelEntries.sort((left, right) => compareStrings(left.provider, right.provider) || compareStrings(left.name, right.name)),
     totalToolCalls: sessions.reduce((sum, session) => sum + session.summary.toolCalls, 0),
     totalTurns: sessions.reduce((sum, session) => sum + session.summary.turns, 0),
     tokenUsage: sumTokens(sessions.map((session) => session.summary.tokenUsage)),
+    cost: { totalMicroUsd, pricedTokens, unpricedTokens, pricingTableVersion: SESSION_PRICING_TABLE_VERSION },
   };
 }
 
@@ -282,11 +303,13 @@ export function assumptionsForProviders(providerIds: ProviderId[]): string[] {
   const assumptions = [
     "When no explicit start is supplied, the scanner uses a deterministic 30-day lookback from the effective end.",
     "Git fileTouches is the sum of per-commit changed-file counts and is not a unique-file count.",
+    "Estimated cost is priced from a static, versioned table of known model families; a model not in that table shows tokens only, never a guessed price.",
   ];
   if (providerIds.includes("codex")) {
     assumptions.push(
       "Codex sessions are repository-scoped from session or turn-context working-directory metadata.",
       "User-turn and assistant-message counts prefer event records and fall back to response records to avoid double counting.",
+      "Codex token usage is a cumulative session-wide snapshot, not tied to a specific model event; a session that switches models attributes its tokens and estimated cost to whichever model had the most turns.",
     );
   }
   if (providerIds.includes("cursor")) {
