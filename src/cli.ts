@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { createInterface } from "node:readline/promises";
+import { realpathSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { canonicalJson } from "./canonical-json.js";
@@ -785,7 +786,16 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+// realpathSync, not path.resolve: npm's POSIX bin-linking installs a real
+// symlink (node_modules/.bin/buildstory-scan -> ../buildstory-scan/dist/src/cli.js),
+// and on Linux, Node's ESM loader sets import.meta.url of an entry module to
+// its REALPATH, while process.argv[1] stays the symlink path the shell
+// actually invoked. path.resolve() normalizes but does not follow symlinks, so
+// the two never matched and this branch silently never ran - confirmed via a
+// Docker repro (node:22-bookworm): exit 0, zero output, every time. Windows
+// never hit this because npm creates .cmd/.ps1 wrappers there instead of a
+// symlink, which is exactly why 149 local (Windows) test runs never caught it.
+if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
   runCli().then(
     (exitCode) => {
       process.exitCode = exitCode;
