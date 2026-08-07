@@ -1,12 +1,23 @@
 {
   "name": "@buildstory/scanner",
-  "version": "0.6.0",
-  "private": true,
+  "version": "0.7.0",
   "description": "BuildStory read-only local scanner for privacy-preserving AI-assisted project snapshots.",
+  "keywords": ["buildstory", "cli", "privacy", "ai-assisted-development", "read-only", "codex", "claude-code"],
+  "homepage": "https://buildstory.dev",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Arjun-Mishra-312/buildStory.git",
+    "directory": "packages/buildstory-scanner"
+  },
+  "bugs": {
+    "url": "https://github.com/Arjun-Mishra-312/buildStory/issues"
+  },
   "type": "module",
+  "publishConfig": {
+    "access": "public"
+  },
   "bin": {
-    "buildstory": "dist/src/cli.js",
-    "story-scanner": "dist/src/cli.js"
+    "buildstory-scan": "dist/src/cli.js"
   },
   "exports": {
     ".": {

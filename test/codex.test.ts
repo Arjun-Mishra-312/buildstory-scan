@@ -189,8 +189,8 @@ test("Codex narrative evidence respects a small maxExcerpts budget deterministic
   }
 });
 
-test("a Codex session that switches models attributes its cumulative token snapshot to the dominant model", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "story-scanner-codex-dominant-model-"));
+test("a Codex session keeps per-response model usage across switches and resets", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "story-scanner-codex-model-ledger-"));
   try {
     const repository = path.join(root, "repo");
     const codexHome = path.join(root, "codex-home");
@@ -210,24 +210,97 @@ test("a Codex session that switches models attributes its cumulative token snaps
       {
         timestamp: "2026-08-04T10:00:00Z",
         type: "session_meta",
-        payload: { id: "dominant-model-session", timestamp: "2026-08-04T10:00:00Z", cwd: repository, model_provider: "openai" },
+          payload: { id: "model-ledger-session", timestamp: "2026-08-04T10:00:00Z", cwd: repository, model_provider: "openai" },
       },
-      // gpt-5-mini gets one turn; gpt-5 gets two - gpt-5 is dominant.
       { timestamp: "2026-08-04T10:00:01Z", type: "turn_context", payload: { cwd: repository, model: "gpt-5-mini" } },
-      { timestamp: "2026-08-04T10:00:02Z", type: "turn_context", payload: { cwd: repository, model: "gpt-5" } },
-      { timestamp: "2026-08-04T10:00:03Z", type: "turn_context", payload: { cwd: repository, model: "gpt-5" } },
       {
-        timestamp: "2026-08-04T10:00:04Z",
+        timestamp: "2026-08-04T10:00:02Z",
         type: "event_msg",
         payload: {
           type: "token_count",
           info: {
             total_token_usage: {
-              input_tokens: 1_000_000,
-              cached_input_tokens: 0,
-              output_tokens: 1_000_000,
-              reasoning_output_tokens: 0,
-              total_tokens: 2_000_000,
+              input_tokens: 100,
+              cached_input_tokens: 20,
+              output_tokens: 10,
+              reasoning_output_tokens: 4,
+              total_tokens: 110,
+            },
+          },
+        },
+      },
+      {
+        timestamp: "2026-08-04T10:00:03Z",
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: {
+            total_token_usage: {
+              input_tokens: 100,
+              cached_input_tokens: 20,
+              output_tokens: 10,
+              reasoning_output_tokens: 4,
+              total_tokens: 110,
+            },
+          },
+        },
+      },
+      { timestamp: "2026-08-04T10:00:04Z", type: "turn_context", payload: { cwd: repository, model: "gpt-5.6-sol" } },
+      {
+        timestamp: "2026-08-04T10:00:05Z",
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: {
+            total_token_usage: {
+              input_tokens: 240,
+              cached_input_tokens: 40,
+              output_tokens: 30,
+              reasoning_output_tokens: 12,
+              total_tokens: 270,
+            },
+          },
+        },
+      },
+      {
+        timestamp: "2026-08-04T10:00:06Z",
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: {
+            // When present, last_token_usage is the accepted response ledger
+            // entry even when cumulative totals are repeated.
+            last_token_usage: {
+              input_tokens: 50,
+              cached_input_tokens: 10,
+              output_tokens: 5,
+              reasoning_output_tokens: 2,
+              total_tokens: 55,
+            },
+            total_token_usage: {
+              input_tokens: 290,
+              cached_input_tokens: 50,
+              output_tokens: 35,
+              reasoning_output_tokens: 14,
+              total_tokens: 325,
+            },
+          },
+        },
+      },
+      {
+        timestamp: "2026-08-04T10:00:07Z",
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: {
+            // A decrease starts a new cumulative segment rather than creating
+            // negative deltas.
+            total_token_usage: {
+              input_tokens: 8,
+              cached_input_tokens: 2,
+              output_tokens: 3,
+              reasoning_output_tokens: 1,
+              total_tokens: 11,
             },
           },
         },
@@ -251,23 +324,119 @@ test("a Codex session that switches models attributes its cumulative token snaps
     validateProjectSnapshot(snapshot);
 
     const byName = new Map(snapshot.usage.models.map((model) => [model.name, model]));
-    const dominant = byName.get("gpt-5");
+    const dominant = byName.get("gpt-5.6-sol");
     const minor = byName.get("gpt-5-mini");
     assert.ok(dominant);
     assert.ok(minor);
-    assert.equal(dominant.turnCount, 2);
+    assert.equal(dominant.turnCount, 3);
     assert.equal(minor.turnCount, 1);
 
-    // The whole cumulative snapshot lands on the dominant model...
-    assert.equal(dominant.tokenUsage?.totalTokens, 2_000_000);
-    assert.equal(dominant.costMicroUsd, estimateSessionCostMicroUsd("gpt-5", { inputTokens: 1_000_000, cachedInputTokens: 0, outputTokens: 1_000_000, reasoningOutputTokens: 0, totalTokens: 2_000_000 }));
-    // ...and the minor model correctly reports no tokens, not a fabricated split.
-    assert.equal(minor.tokenUsage, null);
-    assert.equal(minor.costMicroUsd, null);
+    // The first cumulative segment contributes 110 tokens to the mini model;
+    // the next segment contributes 160, then a direct last-token usage record
+    // contributes 55, and the reset segment contributes 11 to Sol.
+    assert.equal(minor.tokenUsage?.totalTokens, 110);
+    assert.equal(dominant.tokenUsage?.totalTokens, 226);
+    assert.equal(dominant.costMicroUsd, estimateSessionCostMicroUsd("gpt-5.6-sol", dominant.tokenUsage!));
+    assert.equal(snapshot.usage.tokenUsage?.totalTokens, 336);
+    assert.ok(snapshot.quality.assumptions.some((value) => value.includes("per accepted token-count response")));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
-    assert.ok(
-      snapshot.quality.assumptions.some((value) => value.includes("attributes its tokens and estimated cost to whichever model had the most turns")),
+test("a Codex Voice session contributes only the segment after cwd changes into the repository", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "story-scanner-codex-cwd-transition-"));
+  try {
+    const repository = path.join(root, "repo");
+    const voiceDirectory = path.join(root, "realtime-voice-chat");
+    const codexHome = path.join(root, "codex-home");
+    const sessionDirectory = path.join(codexHome, "sessions", "2026", "08", "04");
+    await Promise.all([
+      mkdir(repository, { recursive: true }),
+      mkdir(voiceDirectory, { recursive: true }),
+      mkdir(sessionDirectory, { recursive: true }),
+    ]);
+    await git(repository, ["init", "--quiet"]);
+    await git(repository, ["config", "user.name", "Fixture Builder"]);
+    await git(repository, ["config", "user.email", "fixture@example.invalid"]);
+    await writeFile(path.join(repository, "fixture.txt"), "cwd transition fixture\n", "utf8");
+    await git(repository, ["add", "fixture.txt"]);
+    await git(repository, ["commit", "--quiet", "-m", "fixture commit"], {
+      GIT_AUTHOR_DATE: "2026-08-04T08:00:00Z",
+      GIT_COMMITTER_DATE: "2026-08-04T08:00:00Z",
+    });
+
+    const records = [
+      {
+        timestamp: "2026-08-04T09:00:00Z",
+        type: "session_meta",
+        payload: { id: "voice-to-project", timestamp: "2026-08-04T09:00:00Z", cwd: voiceDirectory, model_provider: "openai" },
+      },
+      { timestamp: "2026-08-04T09:00:01Z", type: "turn_context", payload: { cwd: voiceDirectory, model: "gpt-5.6-terra" } },
+      { timestamp: "2026-08-04T09:00:02Z", type: "event_msg", payload: { type: "user_message", message: "voice-only user text" } },
+      { timestamp: "2026-08-04T09:00:03Z", type: "event_msg", payload: { type: "agent_message", message: "voice-only assistant text" } },
+      {
+        timestamp: "2026-08-04T09:00:04Z",
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: { total_token_usage: { input_tokens: 100, cached_input_tokens: 20, output_tokens: 10, total_tokens: 110 } },
+        },
+      },
+      { timestamp: "2026-08-04T10:00:00Z", type: "turn_context", payload: { cwd: repository, model: "gpt-5.6-sol" } },
+      { timestamp: "2026-08-04T10:00:01Z", type: "event_msg", payload: { type: "user_message", message: "project user text" } },
+      { timestamp: "2026-08-04T10:00:02Z", type: "event_msg", payload: { type: "agent_message", message: "project assistant decision" } },
+      { timestamp: "2026-08-04T10:00:03Z", type: "response_item", payload: { type: "function_call", name: "apply_patch", arguments: "{}" } },
+      {
+        timestamp: "2026-08-04T10:00:04Z",
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: { total_token_usage: { input_tokens: 250, cached_input_tokens: 50, output_tokens: 30, total_tokens: 280 } },
+        },
+      },
+      { timestamp: "2026-08-04T10:00:05Z", type: "event_msg", payload: { type: "task_complete" } },
+      { timestamp: "2026-08-04T11:00:00Z", type: "turn_context", payload: { cwd: voiceDirectory, model: "gpt-5.6-terra" } },
+      { timestamp: "2026-08-04T11:00:01Z", type: "event_msg", payload: { type: "user_message", message: "voice-only trailing text" } },
+      {
+        timestamp: "2026-08-04T11:00:02Z",
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: { total_token_usage: { input_tokens: 400, cached_input_tokens: 80, output_tokens: 50, total_tokens: 450 } },
+        },
+      },
+    ];
+    await writeFile(
+      path.join(sessionDirectory, "voice-to-project.jsonl"),
+      `${records.map((record) => JSON.stringify(record)).join("\n")}\n`,
+      "utf8",
     );
+
+    const snapshot = await buildProjectSnapshot({
+      repositoryPath: repository,
+      consent: "local-scan",
+      providers: ["codex"],
+      codexHome,
+      since: "2026-08-04T00:00:00Z",
+      until: "2026-08-05T00:00:00Z",
+      narrativeEvidence: {},
+    });
+    validateProjectSnapshot(snapshot);
+
+    assert.equal(snapshot.sessions.length, 1);
+    const session = snapshot.sessions[0]!;
+    assert.equal(session.startedAt, "2026-08-04T10:00:00.000Z");
+    assert.equal(session.endedAt, "2026-08-04T10:00:05.000Z");
+    assert.equal(session.turns, 1);
+    assert.equal(session.assistantMessages, 1);
+    assert.equal(session.toolCalls, 1);
+    assert.deepEqual(session.modelRefs, ["gpt-5.6-sol"]);
+    assert.equal(session.tokenUsage?.totalTokens, 170);
+    assert.equal(snapshot.usage.models.some((model) => model.name === "gpt-5.6-terra"), false);
+    const excerpts = snapshot.narrativeEvidence?.excerpts ?? [];
+    assert.ok(excerpts.some((excerpt) => excerpt.text === "project user text"));
+    assert.equal(excerpts.some((excerpt) => excerpt.text.includes("voice-only")), false);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

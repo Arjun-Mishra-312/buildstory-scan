@@ -12,6 +12,7 @@ import type {
 import { ASSISTANT_DECISION_MAX_RAW_CHARS, MAX_ASSISTANT_DECISIONS_PER_SESSION, orderSessionCandidates } from "./narrative-evidence.js";
 import { consumeJsonLines } from "./jsonl.js";
 import { relationToRepository } from "./path-scope.js";
+import { estimateUsageCostNanoUsd } from "../session-pricing.js";
 import type {
   ModelCounts,
   NormalizedConversationEvent,
@@ -196,24 +197,21 @@ function parseTokenUsage(usage: JsonRecord | null): TokenUsage | null {
   };
 }
 
-function addModelTokenUsage(modelCounts: ModelCounts, provider: string, model: string, usage: TokenUsage | null): void {
+function addModelTokenUsage(
+  modelCounts: ModelCounts,
+  provider: string,
+  model: string,
+  usage: TokenUsage | null,
+  timestamp = "2026-08-06T00:00:00.000Z",
+): void {
   const existing = modelCounts.get(model);
+  const costNanoUsd = usage ? estimateUsageCostNanoUsd(model, usage, timestamp) : null;
   modelCounts.set(model, {
     provider,
     turns: (existing?.turns ?? 0) + 1,
     tokenUsage: addTokenUsage(existing?.tokenUsage ?? null, usage),
+    costNanoUsd: costNanoUsd === null ? existing?.costNanoUsd ?? null : (existing?.costNanoUsd ?? 0) + costNanoUsd,
   });
-}
-
-function mergeModelCounts(target: ModelCounts, source: ModelCounts): void {
-  for (const [model, value] of source) {
-    const existing = target.get(model);
-    target.set(model, {
-      provider: value.provider,
-      turns: (existing?.turns ?? 0) + value.turns,
-      tokenUsage: addTokenUsage(existing?.tokenUsage ?? null, value.tokenUsage),
-    });
-  }
 }
 
 function addTokenUsage(total: TokenUsage | null, addition: TokenUsage | null): TokenUsage | null {
@@ -232,6 +230,77 @@ function addTokenUsage(total: TokenUsage | null, addition: TokenUsage | null): T
   };
 }
 
+interface ClaudeAssistantRecord {
+  key: string;
+  model: string | null;
+  usage: TokenUsage | null;
+  timestamp: string;
+  ordinal: number;
+  stopReason: string | null;
+  isSidechain: boolean;
+  content: JsonRecord[];
+  advisors: ClaudeAssistantRecord[];
+}
+
+function assistantRecord(
+  record: JsonRecord,
+  filePath: string,
+  ordinal: number,
+): ClaudeAssistantRecord | null {
+  const message = asRecord(record.message);
+  if (!message) return null;
+  const rawId = asString(message.id) ?? asString(record.uuid);
+  const key = rawId ? `id:${rawId}` : `record:${filePath}:${ordinal}`;
+  const timestamp = isoTimestamp(record.timestamp) ?? "2026-08-06T00:00:00.000Z";
+  const assistant: ClaudeAssistantRecord = {
+    key,
+    model: asString(message.model),
+    usage: parseTokenUsage(asRecord(message.usage)),
+    timestamp,
+    ordinal,
+    stopReason: asString(message.stop_reason),
+    isSidechain: record.isSidechain === true,
+    content: Array.isArray(message.content) ? message.content.filter(isRecord) : [],
+    advisors: [],
+  };
+  const messageUsage = asRecord(message.usage);
+  const iterations = Array.isArray(messageUsage?.iterations) ? messageUsage.iterations : [];
+  iterations.forEach((iteration, index) => {
+    const item = asRecord(iteration);
+    if (asString(item?.type) !== "advisor_message") return;
+    assistant.advisors.push({
+      key: `${key}:advisor:${index}`,
+      model: asString(item?.model) ?? assistant.model,
+      usage: parseTokenUsage(item),
+      timestamp,
+      ordinal: ordinal + index + 1,
+      stopReason: null,
+      isSidechain: true,
+      content: [],
+      advisors: [],
+    });
+  });
+  return assistant;
+}
+
+function addAssistantRecordToLedger(ledger: Map<string, ClaudeAssistantRecord>, record: ClaudeAssistantRecord | null): void {
+  if (!record) return;
+  ledger.set(record.key, record);
+  for (const advisor of record.advisors) ledger.set(advisor.key, advisor);
+}
+
+function addClaudeRecordToModelLedger(
+  record: ClaudeAssistantRecord,
+  modelCounts: ModelCounts,
+  timestamp = record.timestamp,
+): void {
+  if (record.model) addModelTokenUsage(modelCounts, "anthropic", record.model, record.usage, timestamp);
+}
+
+function isSyntheticAssistantRecord(record: ClaudeAssistantRecord): boolean {
+  return record.model?.trim().toLocaleLowerCase("en-US") === "<synthetic>";
+}
+
 /** True for a `user` record that is a tool-result continuation rather than genuine authored input. */
 function isToolResultContinuation(content: unknown): boolean {
   if (!Array.isArray(content)) return false;
@@ -241,11 +310,9 @@ function isToolResultContinuation(content: unknown): boolean {
 /** Sums assistant-message token usage and tool names from one transcript file (main or subagent). */
 async function parseUsageAndTools(
   filePath: string,
-): Promise<{ usage: TokenUsage | null; toolCounts: Map<string, number>; modelCounts: ModelCounts }> {
-  let usage: TokenUsage | null = null;
-  const toolCounts = new Map<string, number>();
-  const modelCounts: ModelCounts = new Map();
-  await consumeJsonLines(filePath, (line) => {
+): Promise<{ records: ClaudeAssistantRecord[]; toolCounts: Map<string, number> }> {
+  const records = new Map<string, ClaudeAssistantRecord>();
+  await consumeJsonLines(filePath, (line, ordinal) => {
     let record: JsonRecord;
     try {
       const parsed: unknown = JSON.parse(line.toString("utf8"));
@@ -254,22 +321,19 @@ async function parseUsageAndTools(
     } catch {
       return true;
     }
-    if (record.type !== "assistant" || record.isSidechain === true) return true;
-    const message = asRecord(record.message);
-    if (!message) return true;
-    const messageUsage = parseTokenUsage(asRecord(message.usage));
-    usage = addTokenUsage(usage, messageUsage);
-    const model = asString(message.model);
-    if (model) addModelTokenUsage(modelCounts, "anthropic", model, messageUsage);
-    for (const block of Array.isArray(message.content) ? message.content : []) {
-      if (isRecord(block) && block.type === "tool_use") {
-        const name = asString(block.name) ?? "unknown-tool";
-        addCount(toolCounts, name);
-      }
-    }
+    if (record.type !== "assistant") return true;
+    const assistant = assistantRecord(record, filePath, ordinal);
+    addAssistantRecordToLedger(records, assistant);
     return true;
   });
-  return { usage, toolCounts, modelCounts };
+  const deduplicatedRecords = [...records.values()];
+  const deduplicatedToolCounts = new Map<string, number>();
+  for (const assistant of deduplicatedRecords) {
+    for (const block of assistant.content) {
+      if (block.type === "tool_use") addCount(deduplicatedToolCounts, asString(block.name) ?? "unknown-tool");
+    }
+  }
+  return { records: deduplicatedRecords, toolCounts: deduplicatedToolCounts };
 }
 
 async function parseClaudeCodeFile(
@@ -305,6 +369,7 @@ async function parseClaudeCodeFile(
   let tokenUsage: TokenUsage | null = null;
   const toolCounts = new Map<string, number>();
   const modelCounts: ModelCounts = new Map();
+  const assistantLedger = new Map<string, ClaudeAssistantRecord>();
 
   const result = await consumeJsonLines(located.filePath, (line, ordinal) => {
     let record: JsonRecord;
@@ -340,7 +405,12 @@ async function parseClaudeCodeFile(
     if (scope === undefined) return true;
 
     const recordType = asString(record.type);
-    if (record.isSidechain === true) return true; // inline subagent content, if an install ever emits it
+    if (recordType === "assistant") {
+      // Streaming records repeat the same message id. Keep the final record
+      // globally, including inline sidechains, and fold sibling files below.
+      addAssistantRecordToLedger(assistantLedger, assistantRecord(record, located.filePath, ordinal));
+    }
+    if (record.isSidechain === true) return true; // inline subagent metrics are ledgered, not parent turns/tools
 
     if (recordType === "user") {
       const message = asRecord(record.message);
@@ -352,26 +422,8 @@ async function parseClaudeCodeFile(
     } else if (recordType === "assistant") {
       const message = asRecord(record.message);
       if (message) {
-        const content = Array.isArray(message.content) ? message.content : [];
-        const hasText = content.some((block) => isRecord(block) && block.type === "text");
-        if (hasText) assistantMessages += 1;
-        lastAssistantStopReason = asString(message.stop_reason);
-        const messageUsage = parseTokenUsage(asRecord(message.usage));
-        tokenUsage = addTokenUsage(tokenUsage, messageUsage);
-        const rawModel = asString(message.model);
-        if (rawModel) {
-          const model = context.redactor.cleanMetadata(rawModel, 160);
-          addModelTokenUsage(modelCounts, "anthropic", model, messageUsage);
-        } else {
+        if (!asString(message.model)) {
           warnings.push(warning("SESSION_MODEL_UNKNOWN", "info", "No model identifier was present in an assistant message."));
-        }
-        for (const block of content) {
-          if (isRecord(block) && block.type === "tool_use") {
-            const rawToolName = asString(block.name) ?? "unknown-tool";
-            const toolName = context.redactor.cleanMetadata(rawToolName, 160);
-            addCount(toolCounts, toolName);
-            if (timestamp && firstToolMarker === null) firstToolMarker = { ordinal, timestamp };
-          }
         }
       }
     }
@@ -405,6 +457,55 @@ async function parseClaudeCodeFile(
     return { matched: true, skipped: true, warnings };
   }
 
+  let subagentInvocations = 0;
+  for (const subagentFile of await discoverSubagentFiles(located.filePath)) {
+    const subagentResult = await parseUsageAndTools(subagentFile);
+    // Sibling transcripts contribute to the parent session's usage ledger, but
+    // their assistant messages/tools must not inflate the parent's narrative
+    // turn/message/tool counts. Keep the distinction after global dedupe.
+    for (const record of subagentResult.records) {
+      addAssistantRecordToLedger(assistantLedger, { ...record, isSidechain: true });
+    }
+    subagentInvocations += 1;
+    const agentType = await subagentAgentType(subagentFile);
+    addCount(toolCounts, `Agent:${context.redactor.cleanMetadata(agentType ?? "unknown", 80)}`);
+    for (const [name, count] of subagentResult.toolCounts) addCount(toolCounts, `${name} (subagent)`, count);
+  }
+
+  const deduplicatedAssistantRecords = [...assistantLedger.values()]
+    .sort((left, right) => compareStrings(left.timestamp, right.timestamp) || left.ordinal - right.ordinal || compareStrings(left.key, right.key));
+  for (const record of deduplicatedAssistantRecords) {
+    // Claude Code emits local bookkeeping/status messages under the literal
+    // model name <synthetic>. They have no API usage and are not model calls.
+    if (isSyntheticAssistantRecord(record)) continue;
+    const model = record.model ? context.redactor.cleanMetadata(record.model, 160) : null;
+    if (model) {
+      const normalizedRecord = { ...record, model };
+      addClaudeRecordToModelLedger(normalizedRecord, modelCounts);
+      tokenUsage = addTokenUsage(tokenUsage, record.usage);
+    } else {
+      addModelTokenUsage(modelCounts, "anthropic", "unknown-model", record.usage, record.timestamp);
+      tokenUsage = addTokenUsage(tokenUsage, record.usage);
+    }
+    if (!record.isSidechain) {
+      if (record.content.some((block) => block.type === "text")) assistantMessages += 1;
+      if (record.stopReason !== null) lastAssistantStopReason = record.stopReason;
+      for (const block of record.content) {
+        if (block.type === "tool_use") {
+          const toolName = context.redactor.cleanMetadata(asString(block.name) ?? "unknown-tool", 160);
+          addCount(toolCounts, toolName);
+          if (firstToolMarker === null) firstToolMarker = { ordinal: record.ordinal, timestamp: record.timestamp };
+        }
+      }
+    }
+  }
+  // Tool calls in the sibling transcripts were added with the explicit
+  // `(subagent)` suffix above; the parent count remains the real main-file
+  // tool-use count. Agent labels are invocation metadata, not tool_use blocks
+  // in the parent transcript.
+  const toolCalls = [...toolCounts.entries()]
+    .filter(([name]) => !name.endsWith(" (subagent)") && !name.startsWith("Agent:"))
+    .reduce((sum, [, count]) => sum + count, 0);
   if (modelCounts.size === 0) {
     warnings.push(warning("SESSION_MODEL_UNKNOWN", "info", "No model identifier was present in the session metadata.", sessionRef));
   }
@@ -412,23 +513,6 @@ async function parseClaudeCodeFile(
     lastAssistantStopReason === null ? "unknown" : lastAssistantStopReason === "tool_use" ? "incomplete" : "completed";
   if (status === "incomplete" && located.kind === "active") {
     warnings.push(warning("SESSION_ACTIVE_AT_SCAN_END", "info", "An active Claude Code session had no completion marker at the observed boundary.", sessionRef));
-  }
-
-  // toolCalls counts real tool_use invocations in the main transcript only.
-  // A subagent spawn is itself already one such tool_use block, so the
-  // informational "Agent:<type>" / "<tool> (subagent)" entries added below
-  // must not inflate this count a second time.
-  const toolCalls = [...toolCounts.values()].reduce((sum, count) => sum + count, 0);
-
-  let subagentInvocations = 0;
-  for (const subagentFile of await discoverSubagentFiles(located.filePath)) {
-    const subagentResult = await parseUsageAndTools(subagentFile);
-    tokenUsage = addTokenUsage(tokenUsage, subagentResult.usage);
-    mergeModelCounts(modelCounts, subagentResult.modelCounts);
-    subagentInvocations += 1;
-    const agentType = await subagentAgentType(subagentFile);
-    addCount(toolCounts, `Agent:${context.redactor.cleanMetadata(agentType ?? "unknown", 80)}`);
-    for (const [name, count] of subagentResult.toolCounts) addCount(toolCounts, `${name} (subagent)`, count);
   }
   const summaryText = context.redactor.cleanMetadata(
     `Claude Code session with ${turns} user turn${turns === 1 ? "" : "s"}, ${assistantMessages} assistant message${assistantMessages === 1 ? "" : "s"}, and ${toolCalls} tool call${toolCalls === 1 ? "" : "s"}.`,

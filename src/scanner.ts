@@ -213,7 +213,13 @@ function safeSum(left: number, right: number): number {
 
 function aggregateUsage(sessions: ProviderSession[]): UsageSummary {
   const tools = new Map<string, { callCount: number; sessions: Set<string> }>();
-  const models = new Map<string, { provider: string; turnCount: number; sessions: Set<string>; tokenUsage: TokenUsage[] }>();
+  const models = new Map<string, {
+    provider: string;
+    turnCount: number;
+    sessions: Set<string>;
+    tokenUsage: TokenUsage[];
+    costNanoUsd: number | null;
+  }>();
   for (const session of sessions) {
     for (const [name, count] of session.toolCounts) {
       const aggregate = tools.get(name) ?? { callCount: 0, sessions: new Set<string>() };
@@ -223,10 +229,17 @@ function aggregateUsage(sessions: ProviderSession[]): UsageSummary {
     }
     for (const [name, model] of session.modelCounts) {
       const key = `${model.provider}\0${name}`;
-      const aggregate = models.get(key) ?? { provider: model.provider, turnCount: 0, sessions: new Set<string>(), tokenUsage: [] };
+      const aggregate = models.get(key) ?? {
+        provider: model.provider,
+        turnCount: 0,
+        sessions: new Set<string>(),
+        tokenUsage: [],
+        costNanoUsd: null,
+      };
       aggregate.turnCount += model.turns;
       aggregate.sessions.add(session.summary.sessionRef);
       if (model.tokenUsage) aggregate.tokenUsage.push(model.tokenUsage);
+      if (model.costNanoUsd !== null) aggregate.costNanoUsd = (aggregate.costNanoUsd ?? 0) + model.costNanoUsd;
       models.set(key, aggregate);
     }
   }
@@ -237,7 +250,11 @@ function aggregateUsage(sessions: ProviderSession[]): UsageSummary {
   const modelEntries = [...models.entries()].map(([key, value]) => {
     const name = key.slice(key.indexOf("\0") + 1);
     const tokenUsage = sumTokens(value.tokenUsage);
-    const costMicroUsd = tokenUsage ? estimateSessionCostMicroUsd(name, tokenUsage) : null;
+    const costMicroUsd = tokenUsage
+      ? value.costNanoUsd !== null
+        ? Math.ceil(value.costNanoUsd / 1_000)
+        : estimateSessionCostMicroUsd(name, tokenUsage)
+      : null;
     if (tokenUsage) {
       if (costMicroUsd === null) {
         unpricedTokens += tokenUsage.totalTokens;
@@ -309,7 +326,7 @@ export function assumptionsForProviders(providerIds: ProviderId[]): string[] {
     assumptions.push(
       "Codex sessions are repository-scoped from session or turn-context working-directory metadata.",
       "User-turn and assistant-message counts prefer event records and fall back to response records to avoid double counting.",
-      "Codex token usage is a cumulative session-wide snapshot, not tied to a specific model event; a session that switches models attributes its tokens and estimated cost to whichever model had the most turns.",
+      "Codex token usage is attributed per accepted token-count response to the active turn-context model; repeated cumulative snapshots are ignored and counter resets start a new ledger segment.",
     );
   }
   if (providerIds.includes("cursor")) {
@@ -322,8 +339,8 @@ export function assumptionsForProviders(providerIds: ProviderId[]): string[] {
     assumptions.push(
       "Claude Code sessions are repository-scoped from the working directory recorded on transcript lines.",
       "Claude Code turn counts exclude tool-result continuation lines; only author-authored messages are counted as turns.",
-      "Claude Code token usage is summed per assistant message rather than read from a cumulative counter.",
-      "Claude Code subagent invocations and their token usage are counted from a sibling transcript directory when present.",
+      "Claude Code token usage is summed per globally deduplicated assistant response, including advisor iterations and folded subagent transcripts.",
+      "Claude Code subagent invocations and their token usage are folded into the parent session while the invocation count remains separately visible.",
     );
   }
   return assumptions;
@@ -658,17 +675,20 @@ export async function buildProjectSnapshot(options: ScanOptions): Promise<Projec
       ...(options.onProgress ? { onProgress: options.onProgress } : {}),
     });
     const defaults = defaultProfileNarrative(profile);
-    const sanitized = sanitizeLocalNarrative(result.sections, defaults.sections, redactor);
     const defaultPack = createDefaultStoryPack(snapshotWithoutId as ProjectSnapshot, profile, []);
     const storyPackCandidate = result.storyPack ?? defaultPack;
     const sanitizedPack = sanitizeStoryPack(storyPackCandidate, defaultPack, redactor);
+    const projectedSections = result.storyPack
+      ? sectionsFromStoryPack(sanitizedPack.storyPack)
+      : result.sections;
+    const sanitized = sanitizeLocalNarrative(projectedSections, defaults.sections, redactor);
     generatedNarrative = {
       version: "2.0.0",
       generatedAt: timeWindow.end,
       mode: "local",
       provider: result.provider,
       model: result.model,
-      sections: result.storyPack ? sectionsFromStoryPack(sanitizedPack.storyPack) : sanitized.sections,
+      sections: sanitized.sections,
       storyPack: sanitizedPack.storyPack,
       fallbacksUsed: [...new Set([
         ...result.fallbacksUsed,

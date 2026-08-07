@@ -2,24 +2,35 @@
 
 BuildStory Scanner is a TypeScript/Node.js CLI for a desktop-first community of AI-assisted software builders. It inspects one user-selected Git worktree read-only, discovers repository-scoped Codex sessions, discards content-bearing fields locally, and emits a deterministic `ProjectSnapshot 1.0.0`.
 
-Version `0.4.0` adds a real end-to-end transport to a BuildStory web app: a separately running **local** app by default, or a single explicitly pinned **HTTPS remote host** per connection (`--remote`, or `--api-base-url`/`--allow-host` for a non-default host). No unpinned or discovered remote endpoint is accepted. The package remains private and unpublished.
+The CLI provides a real end-to-end transport to a BuildStory web app: a separately running **local** app by default, or a single explicitly pinned **HTTPS remote host** per connection (`--remote`, or `--api-base-url`/`--allow-host` for a non-default host). No unpinned or discovered remote endpoint is accepted.
 
-In the consolidated repository, source lives at `packages/buildstory-scanner`, the web app lives at `apps/buildstory-web`, and the verified installable archive is `artifacts/buildstory-scanner-0.4.0.tgz`. Nothing depends on the earlier Codex artifact folders.
+The package is published as **`@buildstory/scanner`** and installs a single binary, **`buildstory-scan`**. In the consolidated repository, source lives at `packages/buildstory-scanner` and the web app lives at `apps/buildstory-web`.
 
-## Install on PowerShell
+## Install
 
-Requirements: Node.js 20+ and Git.
+Requirements: Node.js 22.5+ and Git.
+
+```powershell
+npm install --global '@buildstory/scanner'
+buildstory-scan --version
+```
+
+Or run it without installing:
+
+```powershell
+npx @buildstory/scanner --version
+```
 
 From this source directory:
 
 ```powershell
-Set-Location 'C:\path\to\story-scanner'
+Set-Location 'C:\path\to\buildstory\packages\buildstory-scanner'
 npm ci
 npm run build
 npm install --global .
 
-Get-Command buildstory
-buildstory --version
+Get-Command buildstory-scan
+buildstory-scan --version
 ```
 
 For development, `npm link` can replace the global install:
@@ -28,32 +39,28 @@ For development, `npm link` can replace the global install:
 npm ci
 npm run build
 npm link
-Get-Command buildstory
+Get-Command buildstory-scan
 ```
 
-To install the unpublished local tarball:
+Never advertise `npx buildstory` or `npx story-scanner`. Both names belong to
+unrelated packages already on the public registry, so either would run someone
+else's code. The only correct forms are `npx @buildstory/scanner` and the
+installed `buildstory-scan` binary.
 
-```powershell
-npm install --global 'C:\path\to\buildstory-scanner-0.4.0.tgz'
-buildstory --version
-```
-
-Do not advertise `npx buildstory`: npm could search the public registry for an unrelated package.
-
-If PowerShell says `buildstory` is not recognized, add npm's global command directory to this session:
+If PowerShell says `buildstory-scan` is not recognized, add npm's global command directory to this session:
 
 ```powershell
 $npmGlobal = npm prefix --global
 $env:Path = "$npmGlobal;$env:Path"
-Get-Command buildstory
-buildstory --version
+Get-Command buildstory-scan
+buildstory-scan --version
 ```
 
 If execution policy blocks npm's `.ps1` shim, run the generated `.cmd` shim:
 
 ```powershell
-$buildstory = Join-Path (npm prefix --global) 'buildstory.cmd'
-& $buildstory --version
+$buildstoryScan = Join-Path (npm prefix --global) 'buildstory-scan.cmd'
+& $buildstoryScan --version
 ```
 
 Source-tree fallback:
@@ -70,29 +77,29 @@ Stage 1 connects and stores a short-lived grant. It does **not** read a reposito
 
 ```powershell
 $api = 'http://127.0.0.1:3000/'
-buildstory connect 'UPLOAD_SESSION_ID' --code 'DEVICE_CODE' --api-base-url $api
-buildstory status
+buildstory-scan connect 'UPLOAD_SESSION_ID' --code 'DEVICE_CODE' --api-base-url $api
+buildstory-scan status
 ```
 
 Against the hosted app instead of a local dev server:
 
 ```powershell
-buildstory connect 'UPLOAD_SESSION_ID' --code 'DEVICE_CODE' --remote
-buildstory status
+buildstory-scan connect 'UPLOAD_SESSION_ID' --code 'DEVICE_CODE' --remote
+buildstory-scan status
 ```
 
 Stage 2 runs from the selected repository, requires separate scan and upload consent, validates locally, and performs the grant's single allowed `PUT`:
 
 ```powershell
 Set-Location 'C:\path\to\selected-repository'
-buildstory scan-upload --repo . --consent local-scan --upload-consent local-dashboard
-buildstory status
+buildstory-scan scan-upload --repo . --consent local-scan --upload-consent local-dashboard
+buildstory-scan status
 ```
 
 Optional time bounds and an alternate Codex root remain available:
 
 ```powershell
-buildstory scan-upload --repo . `
+buildstory-scan scan-upload --repo . `
   --codex-home 'C:\Users\me\.codex' `
   --since '2026-07-01T00:00:00Z' `
   --until '2026-08-01T00:00:00Z' `
@@ -109,7 +116,7 @@ The connect response grants exactly one snapshot `PUT`. After acceptance, the sa
 This in-process mode verifies installation and argument parsing only:
 
 ```powershell
-buildstory connect 'UPLOAD_SESSION_ID' --code 'DEVICE_CODE' --api-base-url 'mock://local'
+buildstory-scan connect 'UPLOAD_SESSION_ID' --code 'DEVICE_CODE' --api-base-url 'mock://local'
 ```
 
 It makes no network request, does not contact the dashboard, and creates no upload grant. A later `scan-upload` therefore fails with `UPLOAD_CONNECTION_REQUIRED`.
@@ -122,7 +129,7 @@ Common actionable errors:
 - `CONNECT_REJECTED`: copy a fresh session ID and device code from the dashboard.
 - `UPLOAD_CONNECTION_REQUIRED`: complete a real connect; mock mode is not enough.
 - `UPLOAD_UNAVAILABLE`: the grant was claimed before the attempted PUT; check the dashboard and reconnect before retrying.
-- `UPLOAD_GRANT_ALREADY_USED`: use `buildstory status` or connect again for another upload.
+- `UPLOAD_GRANT_ALREADY_USED`: use `buildstory-scan status` or connect again for another upload.
 
 See [`docs/connect-protocol.md`](docs/connect-protocol.md) and [`docs/upload-lifecycle.md`](docs/upload-lifecycle.md) for the exact wire contract.
 
@@ -134,9 +141,9 @@ never sends excerpts to a non-loopback model unless cloud mode is explicitly
 selected through a connected dashboard:
 
 ```powershell
-buildstory inspect --repo 'C:\path\to\repository'
-buildstory scan --repo 'C:\path\to\repository' --consent local-scan --dry-run
-buildstory scan --repo 'C:\path\to\repository' --consent local-scan --output 'C:\outside-repository\project-snapshot.json'
+buildstory-scan inspect --repo 'C:\path\to\repository'
+buildstory-scan scan --repo 'C:\path\to\repository' --consent local-scan --dry-run
+buildstory-scan scan --repo 'C:\path\to\repository' --consent local-scan --output 'C:\outside-repository\project-snapshot.json'
 ```
 
 `inspect` never opens AI session sources. `scan` requires `--consent local-scan`. Choose exactly one local output mode:
@@ -165,20 +172,25 @@ The selected worktree is never opened for file-body reads. Git runs with optiona
 Recommended PowerShell copy for the local demo:
 
 ```text
-Install the unpublished local CLI first (Node.js 20+):
-  npm install --global "C:\path\to\buildstory-scanner-0.4.0.tgz"
+Install the CLI first (Node.js 22.5+):
+  npm install --global "@buildstory/scanner"
 
 With the local BuildStory web app running:
-  buildstory connect "UPLOAD_SESSION_ID" --code "DEVICE_CODE" --api-base-url "http://127.0.0.1:3000/"
+  buildstory-scan connect "UPLOAD_SESSION_ID" --code "DEVICE_CODE" --api-base-url "http://127.0.0.1:3000/"
 
 From the selected Git repository:
-  buildstory scan-upload --repo . --consent local-scan --upload-consent local-dashboard
+  buildstory-scan scan-upload --repo . --consent local-scan --upload-consent local-dashboard
 
 Then check the local result:
-  buildstory status
+  buildstory-scan status
 ```
 
-`story-scanner` remains a backward-compatible binary alias, but new dashboard copy should use `buildstory`.
+The `buildstory` and `story-scanner` binary aliases were removed before the first
+publish: both names are already taken on npm by unrelated packages, so shipping
+them would have made a global install collide with someone else's tool.
+`buildstory-scan` is the only binary. Note that this is a distribution detail —
+`provenance.scanner.name` in an emitted snapshot stays `buildstory`, because the
+ProjectSnapshot schema pins it to an enum the server validates.
 
 ## Design references and provenance
 
@@ -198,4 +210,4 @@ npm run test:e2e
 npm pack
 ```
 
-`npm test` includes a package smoke test that packs the unpublished package, installs it under a fresh npm prefix, and invokes `buildstory` through PowerShell. `npm run test:e2e` starts an ephemeral loopback HTTP server and verifies connect, canonical one-PUT upload, replay refusal, authenticated status/report GETs, and absence of repository paths, remote hosts, transcript bodies, and tool payloads from the wire body. Nothing is published or deployed.
+`npm test` includes a package smoke test that packs the package, installs it under a fresh npm prefix, invokes `buildstory-scan` through PowerShell, and asserts the retired `buildstory`/`story-scanner` aliases are absent. `npm run test:e2e` starts an ephemeral loopback HTTP server and verifies connect, canonical one-PUT upload, replay refusal, authenticated status/report GETs, and absence of repository paths, remote hosts, transcript bodies, and tool payloads from the wire body. Nothing is published or deployed.

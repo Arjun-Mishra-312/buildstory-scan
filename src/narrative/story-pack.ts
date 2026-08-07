@@ -18,6 +18,138 @@ const LIMITS = {
   shortBody: 300,
 };
 
+const SOURCE_REFS_SCHEMA = {
+  type: "array",
+  minItems: 1,
+  maxItems: 4,
+  items: { type: "string", minLength: 1, maxLength: 40 },
+} as const;
+
+export const STORY_PACK_STORY_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["hero", "buildArc", "moments", "turningPoint"],
+  properties: {
+    hero: {
+      type: "object",
+      additionalProperties: false,
+      required: ["headline", "summary"],
+      properties: {
+        headline: { type: "string", minLength: 1, maxLength: LIMITS.headline },
+        summary: { type: "string", minLength: 1, maxLength: LIMITS.summary },
+      },
+    },
+    buildArc: {
+      type: "array",
+      minItems: 3,
+      maxItems: 3,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["phase", "headline", "summary", "sourceRefs"],
+        properties: {
+          phase: { enum: ["discover", "decide", "deliver"] },
+          headline: { type: "string", minLength: 1, maxLength: LIMITS.arcHeadline },
+          summary: { type: "string", minLength: 1, maxLength: LIMITS.arcSummary },
+          sourceRefs: SOURCE_REFS_SCHEMA,
+        },
+      },
+    },
+    moments: {
+      type: "array",
+      minItems: 3,
+      maxItems: 5,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["phase", "kind", "title", "whatHappened", "whyItMattered", "sourceRefs"],
+        properties: {
+          phase: { enum: ["discover", "decide", "deliver"] },
+          kind: { enum: ["discovery", "decision", "breakthrough", "delivery"] },
+          title: { type: "string", minLength: 1, maxLength: LIMITS.title },
+          whatHappened: { type: "string", minLength: 1, maxLength: LIMITS.body },
+          whyItMattered: { type: "string", minLength: 1, maxLength: LIMITS.body },
+          sourceRefs: SOURCE_REFS_SCHEMA,
+        },
+      },
+    },
+    turningPoint: {
+      type: "object",
+      additionalProperties: false,
+      required: ["quote", "sourceRefs"],
+      properties: {
+        quote: { type: "string", minLength: 1, maxLength: LIMITS.shortBody },
+        sourceRefs: SOURCE_REFS_SCHEMA,
+      },
+    },
+  },
+} as const;
+
+export const STORY_PACK_INSIGHTS_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["decisions", "learnings", "standoutTraits", "growthEdge"],
+  properties: {
+    decisions: {
+      type: "array",
+      minItems: 2,
+      maxItems: 4,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["title", "rationale", "outcome", "sourceRefs"],
+        properties: {
+          title: { type: "string", minLength: 1, maxLength: LIMITS.title },
+          rationale: { type: "string", minLength: 1, maxLength: LIMITS.shortBody },
+          outcome: { type: "string", minLength: 1, maxLength: LIMITS.shortBody },
+          sourceRefs: SOURCE_REFS_SCHEMA,
+        },
+      },
+    },
+    learnings: {
+      type: "array",
+      minItems: 2,
+      maxItems: 4,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["title", "detail", "sourceRefs"],
+        properties: {
+          title: { type: "string", minLength: 1, maxLength: LIMITS.title },
+          detail: { type: "string", minLength: 1, maxLength: LIMITS.shortBody },
+          sourceRefs: SOURCE_REFS_SCHEMA,
+        },
+      },
+    },
+    standoutTraits: {
+      type: "array",
+      minItems: 2,
+      maxItems: 4,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["title", "detail", "sourceRefs"],
+        properties: {
+          title: { type: "string", minLength: 1, maxLength: LIMITS.title },
+          detail: { type: "string", minLength: 1, maxLength: LIMITS.shortBody },
+          sourceRefs: SOURCE_REFS_SCHEMA,
+        },
+      },
+    },
+    growthEdge: {
+      type: "object",
+      additionalProperties: false,
+      required: ["title", "observation", "nextStep", "sourceRefs"],
+      properties: {
+        title: { type: "string", minLength: 1, maxLength: LIMITS.title },
+        observation: { type: "string", minLength: 1, maxLength: LIMITS.body },
+        nextStep: { type: "string", minLength: 1, maxLength: LIMITS.shortBody },
+        sourceRefs: SOURCE_REFS_SCHEMA,
+      },
+    },
+  },
+} as const;
+
 function text(value: unknown, max: number): string {
   return typeof value === "string" ? value.trim().slice(0, max) : "";
 }

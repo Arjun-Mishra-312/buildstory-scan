@@ -224,7 +224,7 @@ export async function consumeUploadGrant(override?: string, now = new Date()): P
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
       throw new ScannerError(
         "UPLOAD_CONNECTION_REQUIRED",
-        "No one-time local upload grant is available. Start the local web app and run buildstory connect again.",
+        "No one-time local upload grant is available. Start the local web app and run buildstory-scan connect again.",
         2,
       );
     }
@@ -242,12 +242,12 @@ export async function consumeUploadGrant(override?: string, now = new Date()): P
       restoreClaim = true;
       throw new ScannerError(
         "UPLOAD_GRANT_ALREADY_USED",
-        "The stored grant has already uploaded a snapshot. Run buildstory status, or connect again for another upload.",
+        "The stored grant has already uploaded a snapshot. Run buildstory-scan status, or connect again for another upload.",
         2,
       );
     }
     if (Date.parse(state.expiresAt) <= now.getTime()) {
-      throw new ScannerError("UPLOAD_GRANT_EXPIRED", "The one-time local upload grant expired. Run buildstory connect again.", 2);
+      throw new ScannerError("UPLOAD_GRANT_EXPIRED", "The one-time local upload grant expired. Run buildstory-scan connect again.", 2);
     }
     leaseCreated = true;
     let released = false;

@@ -1,107 +1,176 @@
 /**
- * Static, versioned pricing for the AI coding-session models this scanner
- * observes (Claude Code, Codex) — not a live-fetched table, so a scan never
- * needs network access to price a session. Deliberately separate from the
- * web app's narrative/pricing.ts, which prices Buildstory's own
- * story-generation model calls, not a creator's coding-session spend.
- *
- * Matched by longest matching lowercase prefix, since providers append a
- * dated snapshot suffix (e.g. "claude-sonnet-4-5-20250929") that a table of
- * exact strings would go stale against almost immediately. An unmatched
- * model returns null from every lookup here — tokens are still shown, a
- * dollar figure is never guessed for a model this table doesn't recognize.
- *
- * Versioned so a historical report never silently re-prices when this table
- * is next updated; update PRICING_TABLE_VERSION whenever a rate changes.
+ * Static, versioned API-equivalent pricing for the AI coding-session models
+ * this scanner observes. The scanner never fetches prices during a scan, so
+ * the rate table and its effective dates are part of the snapshot provenance.
  */
 
 import type { TokenUsage } from "./contract.js";
 
-export const SESSION_PRICING_TABLE_VERSION = "2026-08-05.1" as const;
+export const SESSION_PRICING_TABLE_VERSION = "2026-08-06.2-api-equivalent" as const;
+
+const DEFAULT_PRICING_TIMESTAMP = "2026-08-06T00:00:00.000Z";
+const OPENAI_LONG_CONTEXT_INPUT_TOKENS = 272_000;
 
 interface ModelPricing {
-  /** USD per million tokens, expressed as micro-USD per token (1 USD = 1,000,000 micro-USD). */
+  /** USD per million tokens. */
   input: number;
   output: number;
-  /** Cache-write rate for providers that bill cache writes separately from input (Anthropic). */
+  cacheRead: number;
   cacheWrite5m?: number;
   cacheWrite1h?: number;
-  /** Cache-read / cached-input rate, billed well below the base input rate. */
-  cacheRead: number;
+  /** GPT-5.6 long-context multipliers, if published for this model family. */
+  longContextInputMultiplier?: number;
+  longContextOutputMultiplier?: number;
 }
 
 interface PricingEntry {
-  /** Lowercase prefix matched against the model id. Longest match wins. */
   prefix: string;
   pricing: ModelPricing;
+  effectiveFrom?: string;
+  effectiveUntil?: string;
 }
 
-/**
- * Anthropic (Claude Code) and OpenAI (Codex) published per-token rates,
- * grouped by model family. Cursor and Gemini Antigravity are not priced:
- * their adapters never report tokenUsage, so there is nothing to price.
- */
-const PRICING_TABLE: PricingEntry[] = [
-  // Anthropic — Claude Code. Cache writes billed separately from base input;
-  // cache reads billed well below it.
-  { prefix: "claude-haiku", pricing: { input: 0.8, output: 4, cacheWrite5m: 1, cacheWrite1h: 1.6, cacheRead: 0.08 } },
-  { prefix: "claude-3-5-haiku", pricing: { input: 0.8, output: 4, cacheWrite5m: 1, cacheWrite1h: 1.6, cacheRead: 0.08 } },
-  { prefix: "claude-sonnet", pricing: { input: 3, output: 15, cacheWrite5m: 3.75, cacheWrite1h: 6, cacheRead: 0.3 } },
-  { prefix: "claude-3-5-sonnet", pricing: { input: 3, output: 15, cacheWrite5m: 3.75, cacheWrite1h: 6, cacheRead: 0.3 } },
-  { prefix: "claude-3-7-sonnet", pricing: { input: 3, output: 15, cacheWrite5m: 3.75, cacheWrite1h: 6, cacheRead: 0.3 } },
-  { prefix: "claude-opus", pricing: { input: 15, output: 75, cacheWrite5m: 18.75, cacheWrite1h: 30, cacheRead: 1.5 } },
+const pricing = (
+  input: number,
+  output: number,
+  cacheRead: number,
+  options: Pick<ModelPricing, "cacheWrite5m" | "cacheWrite1h" | "longContextInputMultiplier" | "longContextOutputMultiplier"> = {},
+): ModelPricing => ({ input, output, cacheRead, ...options });
 
-  // OpenAI — Codex. No separate cache-write charge; cached input is billed
-  // at a flat discount off the base input rate via cachedInputTokens.
-  { prefix: "gpt-5-codex", pricing: { input: 1.25, output: 10, cacheRead: 0.125 } },
-  { prefix: "gpt-5-mini", pricing: { input: 0.25, output: 2, cacheRead: 0.025 } },
-  { prefix: "gpt-5-nano", pricing: { input: 0.05, output: 0.4, cacheRead: 0.005 } },
-  { prefix: "gpt-5", pricing: { input: 1.25, output: 10, cacheRead: 0.125 } },
-  { prefix: "gpt-4.1-mini", pricing: { input: 0.4, output: 1.6, cacheRead: 0.1 } },
-  { prefix: "gpt-4.1", pricing: { input: 2, output: 8, cacheRead: 0.5 } },
-  { prefix: "o4-mini", pricing: { input: 1.1, output: 4.4, cacheRead: 0.275 } },
-  { prefix: "o3", pricing: { input: 2, output: 8, cacheRead: 0.5 } },
+/** Longest matching prefix wins; dated provider snapshots therefore remain supported. */
+const PRICING_TABLE: PricingEntry[] = [
+  // Anthropic. Sonnet 5 introductory pricing is effective through 2026-08-31.
+  {
+    prefix: "claude-sonnet-5",
+    pricing: pricing(2, 10, 0.2, { cacheWrite5m: 2.5, cacheWrite1h: 4 }),
+    effectiveUntil: "2026-09-01T00:00:00.000Z",
+  },
+  {
+    prefix: "claude-sonnet-5",
+    pricing: pricing(3, 15, 0.3, { cacheWrite5m: 3.75, cacheWrite1h: 6 }),
+    effectiveFrom: "2026-09-01T00:00:00.000Z",
+  },
+  { prefix: "claude-opus-5", pricing: pricing(5, 25, 0.5, { cacheWrite5m: 6.25, cacheWrite1h: 10 }) },
+  { prefix: "claude-haiku", pricing: pricing(0.8, 4, 0.08, { cacheWrite5m: 1, cacheWrite1h: 1.6 }) },
+  { prefix: "claude-3-5-haiku", pricing: pricing(0.8, 4, 0.08, { cacheWrite5m: 1, cacheWrite1h: 1.6 }) },
+  { prefix: "claude-sonnet", pricing: pricing(3, 15, 0.3, { cacheWrite5m: 3.75, cacheWrite1h: 6 }) },
+  { prefix: "claude-3-5-sonnet", pricing: pricing(3, 15, 0.3, { cacheWrite5m: 3.75, cacheWrite1h: 6 }) },
+  { prefix: "claude-3-7-sonnet", pricing: pricing(3, 15, 0.3, { cacheWrite5m: 3.75, cacheWrite1h: 6 }) },
+  { prefix: "claude-opus", pricing: pricing(15, 75, 1.5, { cacheWrite5m: 18.75, cacheWrite1h: 30 }) },
+
+  // OpenAI public API rates. GPT-5.6 aliases are intentionally more specific
+  // than the legacy gpt-5 fallback below.
+  {
+    prefix: "gpt-5.6-sol",
+    pricing: pricing(5, 30, 0.5, {
+      cacheWrite5m: 6.25,
+      longContextInputMultiplier: 2,
+      longContextOutputMultiplier: 1.5,
+    }),
+  },
+  {
+    prefix: "gpt-5.6-terra",
+    pricing: pricing(2.5, 15, 0.25, {
+      cacheWrite5m: 3.125,
+      longContextInputMultiplier: 2,
+      longContextOutputMultiplier: 1.5,
+    }),
+  },
+  {
+    prefix: "gpt-5.6-luna",
+    pricing: pricing(1, 6, 0.1, {
+      cacheWrite5m: 1.25,
+      longContextInputMultiplier: 2,
+      longContextOutputMultiplier: 1.5,
+    }),
+  },
+  // The unsuffixed alias routes to Sol; the longer suffixed prefixes above win.
+  {
+    prefix: "gpt-5.6",
+    pricing: pricing(5, 30, 0.5, {
+      cacheWrite5m: 6.25,
+      longContextInputMultiplier: 2,
+      longContextOutputMultiplier: 1.5,
+    }),
+  },
+  { prefix: "gpt-5-codex", pricing: pricing(1.25, 10, 0.125) },
+  { prefix: "gpt-5-mini", pricing: pricing(0.25, 2, 0.025) },
+  { prefix: "gpt-5-nano", pricing: pricing(0.05, 0.4, 0.005) },
+  { prefix: "gpt-5", pricing: pricing(1.25, 10, 0.125) },
+  { prefix: "gpt-4.1-mini", pricing: pricing(0.4, 1.6, 0.1) },
+  { prefix: "gpt-4.1", pricing: pricing(2, 8, 0.5) },
+  { prefix: "o4-mini", pricing: pricing(1.1, 4.4, 0.275) },
+  { prefix: "o3", pricing: pricing(2, 8, 0.5) },
 ];
 
-function findPricing(model: string): ModelPricing | null {
-  const normalized = model.trim().toLocaleLowerCase("en-US");
-  let best: PricingEntry | null = null;
-  for (const entry of PRICING_TABLE) {
-    if (!normalized.startsWith(entry.prefix)) continue;
-    if (!best || entry.prefix.length > best.prefix.length) best = entry;
-  }
-  return best?.pricing ?? null;
+function isEffective(entry: PricingEntry, timestamp: string): boolean {
+  return (!entry.effectiveFrom || timestamp >= entry.effectiveFrom)
+    && (!entry.effectiveUntil || timestamp < entry.effectiveUntil);
 }
 
-export function isPricedModel(model: string): boolean {
-  return findPricing(model) !== null;
+function findPricing(model: string, timestamp = DEFAULT_PRICING_TIMESTAMP): ModelPricing | null {
+  const normalized = model.trim().toLocaleLowerCase("en-US");
+  const candidates = PRICING_TABLE.filter((entry) => normalized.startsWith(entry.prefix) && isEffective(entry, timestamp));
+  candidates.sort((left, right) => right.prefix.length - left.prefix.length || (right.effectiveFrom ?? "").localeCompare(left.effectiveFrom ?? ""));
+  return candidates[0]?.pricing ?? null;
+}
+
+export function isPricedModel(model: string, timestamp = DEFAULT_PRICING_TIMESTAMP): boolean {
+  return findPricing(model, timestamp) !== null;
+}
+
+function nanoUsdPerToken(usdPerMillion: number): number {
+  // $1/M token = 1,000 nano-USD/token.
+  return usdPerMillion * 1_000;
 }
 
 /**
- * Returns whole micro-USD (rounded up so a fractional cost never reads as
- * free), or null when `model` isn't in the table — never a fabricated price.
+ * Returns the unrounded cost in nano-USD. Callers aggregate this value across
+ * responses and round only once when producing the public micro-USD field.
  */
-export function estimateSessionCostMicroUsd(model: string, usage: TokenUsage): number | null {
-  const pricing = findPricing(model);
-  if (!pricing) return null;
+export function estimateUsageCostNanoUsd(
+  model: string,
+  usage: TokenUsage,
+  timestamp = DEFAULT_PRICING_TIMESTAMP,
+): number | null {
+  const modelPricing = findPricing(model, timestamp);
+  if (!modelPricing) return null;
 
-  let microUsd = usage.inputTokens * pricing.input + usage.outputTokens * pricing.output;
-  microUsd += usage.reasoningOutputTokens * pricing.output;
-  // OpenAI-style cached input: a discounted subset billed via cachedInputTokens.
-  microUsd += usage.cachedInputTokens * pricing.cacheRead;
-  // Anthropic-style cache read, always a separate bucket from cachedInputTokens.
-  microUsd += (usage.cacheReadInputTokens ?? 0) * pricing.cacheRead;
+  const openAiLongContext = model.trim().toLocaleLowerCase("en-US").startsWith("gpt-5.6")
+    && modelPricing.longContextInputMultiplier !== undefined;
+  const promptInputTokens = usage.inputTokens + usage.cachedInputTokens + (usage.cacheCreationInputTokens ?? 0);
+  const inputMultiplier = openAiLongContext && promptInputTokens > OPENAI_LONG_CONTEXT_INPUT_TOKENS
+    ? modelPricing.longContextInputMultiplier!
+    : 1;
+  const outputMultiplier = openAiLongContext && promptInputTokens > OPENAI_LONG_CONTEXT_INPUT_TOKENS
+    ? modelPricing.longContextOutputMultiplier ?? 1
+    : 1;
 
-  const cacheWrite1h = usage.cacheCreation1hInputTokens;
-  const cacheWrite5m = usage.cacheCreation5mInputTokens;
-  if (cacheWrite1h !== undefined || cacheWrite5m !== undefined) {
-    microUsd += (cacheWrite1h ?? 0) * (pricing.cacheWrite1h ?? pricing.cacheWrite5m ?? pricing.input);
-    microUsd += (cacheWrite5m ?? 0) * (pricing.cacheWrite5m ?? pricing.input);
+  let nanoUsd = usage.inputTokens * nanoUsdPerToken(modelPricing.input) * inputMultiplier;
+  nanoUsd += usage.cachedInputTokens * nanoUsdPerToken(modelPricing.cacheRead) * inputMultiplier;
+  nanoUsd += (usage.cacheReadInputTokens ?? 0) * nanoUsdPerToken(modelPricing.cacheRead);
+  nanoUsd += usage.outputTokens * nanoUsdPerToken(modelPricing.output) * outputMultiplier;
+
+  const hasCacheSplit = usage.cacheCreation1hInputTokens !== undefined || usage.cacheCreation5mInputTokens !== undefined;
+  if (hasCacheSplit) {
+    nanoUsd += (usage.cacheCreation1hInputTokens ?? 0)
+      * nanoUsdPerToken(modelPricing.cacheWrite1h ?? modelPricing.cacheWrite5m ?? modelPricing.input) * inputMultiplier;
+    nanoUsd += (usage.cacheCreation5mInputTokens ?? 0)
+      * nanoUsdPerToken(modelPricing.cacheWrite5m ?? modelPricing.input) * inputMultiplier;
   } else if (usage.cacheCreationInputTokens) {
-    // No 1h/5m split reported; price the total at the base (5m) cache-write
-    // rate as the conservative default — most cache writes are short-lived.
-    microUsd += usage.cacheCreationInputTokens * (pricing.cacheWrite5m ?? pricing.input);
+    nanoUsd += usage.cacheCreationInputTokens
+      * nanoUsdPerToken(modelPricing.cacheWrite5m ?? modelPricing.input) * inputMultiplier;
   }
 
-  return Math.ceil(microUsd);
+  return nanoUsd;
+}
+
+/** Returns whole micro-USD, rounding up only after the aggregate calculation. */
+export function estimateSessionCostMicroUsd(
+  model: string,
+  usage: TokenUsage,
+  timestamp = DEFAULT_PRICING_TIMESTAMP,
+): number | null {
+  const nanoUsd = estimateUsageCostNanoUsd(model, usage, timestamp);
+  return nanoUsd === null ? null : Math.ceil(nanoUsd / 1_000);
 }

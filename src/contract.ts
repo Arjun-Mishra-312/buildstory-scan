@@ -2,7 +2,7 @@
 
 export const PROJECT_SNAPSHOT_SCHEMA_VERSION = "1.6.0" as const;
 export const SCANNER_NAME = "buildstory" as const;
-export const SCANNER_VERSION = "0.6.0" as const;
+export const SCANNER_VERSION = "0.7.0" as const;
 export const CONSENT_STATEMENT_VERSION = "1.0" as const;
 /** Separate, additional consent for the opt-in narrativeEvidence bundle only. */
 export const NARRATIVE_EVIDENCE_CONSENT_VERSION = "1.0" as const;
@@ -282,13 +282,12 @@ export interface UsageSummary {
   models: Array<{
     provider: string;
     name: string;
+    /** Normalized model-response calls; retained as turnCount for 1.6 wire compatibility. */
     turnCount: number;
     sessionCount: number;
     /**
-     * Exact for Claude Code (model and usage co-occur on every assistant
-     * message); a session-level approximation for Codex, whose token_count
-     * events are a cumulative snapshot not tied to a specific model event
-     * (see assumptionsForProviders). Null where no session reported usage.
+     * Exact for Claude Code after response-id deduplication and Codex after
+     * per-token_count ledger attribution. Null where no session reported usage.
      */
     tokenUsage: TokenUsage | null;
     /** Null when `name` isn't in the static session-pricing table — never a fabricated price. */

@@ -44,20 +44,29 @@ function usageSummarySuffix(snapshot: ProjectSnapshot): string {
 const DEFAULT_REMOTE_API_BASE_URL = "https://buildstory.dev/";
 const DEFAULT_REMOTE_HOST = "buildstory.dev";
 
+/**
+ * The installed binary name. Deliberately not "buildstory": that name, and the
+ * old "story-scanner" alias, are both already published on npm by unrelated
+ * authors, so a global install of either would collide. This is a distribution
+ * detail only - provenance.scanner.name stays "buildstory" because the
+ * ProjectSnapshot schema pins it to an enum and the server validates it.
+ */
+const CLI_COMMAND = "buildstory-scan";
+
 const HELP = `BuildStory CLI ${SCANNER_VERSION}
 
 Read-only local scanner. ProjectSnapshot transport is loopback by default, or
 a single explicitly pinned HTTPS remote host per connection.
 
 Usage:
-  buildstory connect <upload-session-id> --code <device-code> --api-base-url <loopback-url>
-  buildstory connect <upload-session-id> --code <device-code> --remote
-  buildstory connect <upload-session-id> --code <device-code> --api-base-url <https-url> --allow-host <hostname>
-  buildstory status [--timeout-ms <number>]
-  buildstory inspect --repo <directory>
-  buildstory scan --repo <directory> --consent local-scan --dry-run
-  buildstory scan --repo <directory> --consent local-scan --output <file> [--overwrite]
-  buildstory scan-upload --repo <directory> --consent local-scan --upload-consent local-dashboard
+  ${CLI_COMMAND} connect <upload-session-id> --code <device-code> --api-base-url <loopback-url>
+  ${CLI_COMMAND} connect <upload-session-id> --code <device-code> --remote
+  ${CLI_COMMAND} connect <upload-session-id> --code <device-code> --api-base-url <https-url> --allow-host <hostname>
+  ${CLI_COMMAND} status [--timeout-ms <number>]
+  ${CLI_COMMAND} inspect --repo <directory>
+  ${CLI_COMMAND} scan --repo <directory> --consent local-scan --dry-run
+  ${CLI_COMMAND} scan --repo <directory> --consent local-scan --output <file> [--overwrite]
+  ${CLI_COMMAND} scan-upload --repo <directory> --consent local-scan --upload-consent local-dashboard
 
 Connection options:
   --code <device-code>       One-time code copied from the dashboard.
@@ -588,12 +597,31 @@ function printLocalNarrativeForReview(snapshot: ReviewableSnapshot): void {
   if (narrative.fallbacksUsed.length) process.stdout.write(`Deterministic fallbacks used: ${narrative.fallbacksUsed.join(", ")}.\n\n`);
 }
 
-async function confirmProceed(prompt: string): Promise<boolean> {
+export function isPromptCancellation(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const code = "code" in error && typeof error.code === "string" ? error.code : "";
+  return error.name === "AbortError"
+    || code === "ABORT_ERR"
+    || code === "ERR_USE_AFTER_CLOSE"
+    || /readline was closed/i.test(error.message);
+}
+
+export async function confirmProceed(prompt: string): Promise<boolean> {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const controller = new AbortController();
+  const handleInterrupt = () => controller.abort();
+  process.once("SIGINT", handleInterrupt);
   try {
-    const answer = await rl.question(`${prompt} Type "yes" to continue: `);
+    const answer = await rl.question(`${prompt} Type "yes" to continue: `, { signal: controller.signal });
     return answer.trim().toLowerCase() === "yes";
+  } catch (error) {
+    if (controller.signal.aborted || isPromptCancellation(error)) {
+      process.stdout.write("\n");
+      throw new ScannerError("CANCELLED", "Cancelled. No snapshot was written or uploaded.", 130);
+    }
+    throw error;
   } finally {
+    process.off("SIGINT", handleInterrupt);
     rl.close();
   }
 }
@@ -633,11 +661,11 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
     });
     if (result.source === "local") {
       if (result.connection.state === "none") {
-        process.stdout.write("No local dashboard connection is stored. Start the local web app and run buildstory connect.\n");
+        process.stdout.write("No local dashboard connection is stored. Start the local web app and run buildstory-scan connect.\n");
       } else if (result.connection.state === "ready") {
         process.stdout.write(`A one-PUT local dashboard grant is ready until ${result.connection.expiresAt}. No snapshot has been uploaded with it.\n`);
       } else if (result.connection.state === "expired") {
-        process.stdout.write("The local dashboard credential expired. Run buildstory connect with a fresh dashboard code.\n");
+        process.stdout.write("The local dashboard credential expired. Run buildstory-scan connect with a fresh dashboard code.\n");
       } else {
         process.stdout.write("A snapshot was uploaded, but its read-only dashboard status is unavailable.\n");
       }
@@ -728,7 +756,7 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
         `Validated and uploaded ProjectSnapshot ${snapshot.schemaVersion}: ${receipt.payloadBytes} bytes, ${snapshot.sessions.length} sessions, ${snapshot.git.commits} commits, ${snapshot.quality.warningCount} warnings${usageSummarySuffix(snapshot)}.\n`,
       );
       process.stdout.write(
-        "Local dashboard accepted the one-PUT snapshot. Run buildstory status for authenticated read-only status/report updates until the credential expires.\n",
+        "Local dashboard accepted the one-PUT snapshot. Run buildstory-scan status for authenticated read-only status/report updates until the credential expires.\n",
       );
     }
     return 0;

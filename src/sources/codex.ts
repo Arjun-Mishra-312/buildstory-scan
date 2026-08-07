@@ -12,6 +12,7 @@ import type {
 import { ASSISTANT_DECISION_MAX_RAW_CHARS, MAX_ASSISTANT_DECISIONS_PER_SESSION, orderSessionCandidates } from "./narrative-evidence.js";
 import { consumeJsonLines } from "./jsonl.js";
 import { relationToRepository } from "./path-scope.js";
+import { estimateUsageCostNanoUsd } from "../session-pricing.js";
 import type {
   ModelCounts,
   NormalizedConversationEvent,
@@ -25,7 +26,7 @@ import type {
 
 const MAX_SESSION_FILES = 5_000;
 const MAX_SESSION_FILE_BYTES = 128 * 1024 * 1024;
-const MAX_DISCOVERY_LINES = 100;
+const DEFAULT_TOKEN_TIMESTAMP = "2026-08-06T00:00:00.000Z";
 const MAX_DISCOVERY_DEPTH = 6;
 
 type JsonRecord = Record<string, unknown>;
@@ -81,15 +82,80 @@ function addCount(map: Map<string, number>, key: string, count = 1): void {
 
 function parseTokenUsage(payload: JsonRecord): TokenUsage | null {
   const info = asRecord(payload.info);
-  const usage = asRecord(info?.total_token_usage ?? payload.total_token_usage);
+  const usage = asRecord(info?.last_token_usage ?? info?.total_token_usage ?? payload.last_token_usage ?? payload.total_token_usage);
   if (!usage) return null;
-  const inputTokens = asNonNegativeInteger(usage.input_tokens);
+  const reportedInputTokens = asNonNegativeInteger(usage.input_tokens);
   const cachedInputTokens = asNonNegativeInteger(usage.cached_input_tokens);
+  const cacheWriteInputTokens = asNonNegativeInteger(usage.cache_write_input_tokens);
+  const inputTokens = Math.max(0, reportedInputTokens - cachedInputTokens - cacheWriteInputTokens);
   const outputTokens = asNonNegativeInteger(usage.output_tokens);
   const reasoningOutputTokens = asNonNegativeInteger(usage.reasoning_output_tokens);
   const reportedTotal = asNonNegativeInteger(usage.total_tokens);
-  const totalTokens = reportedTotal || inputTokens + outputTokens;
-  return { inputTokens, cachedInputTokens, outputTokens, reasoningOutputTokens, totalTokens };
+  const totalTokens = reportedTotal || reportedInputTokens + outputTokens;
+  return {
+    inputTokens,
+    cachedInputTokens,
+    outputTokens,
+    reasoningOutputTokens,
+    totalTokens,
+    ...(usage.cache_write_input_tokens !== undefined ? { cacheCreationInputTokens: cacheWriteInputTokens } : {}),
+  };
+}
+
+function usageFingerprint(usage: TokenUsage): string {
+  return [
+    usage.inputTokens,
+    usage.cachedInputTokens,
+    usage.cacheCreationInputTokens ?? 0,
+    usage.outputTokens,
+    usage.reasoningOutputTokens,
+    usage.totalTokens,
+  ].join("/");
+}
+
+function addTokenUsage(total: TokenUsage | null, addition: TokenUsage | null): TokenUsage | null {
+  if (!addition) return total;
+  if (!total) return addition;
+  return {
+    inputTokens: total.inputTokens + addition.inputTokens,
+    cachedInputTokens: total.cachedInputTokens + addition.cachedInputTokens,
+    outputTokens: total.outputTokens + addition.outputTokens,
+    reasoningOutputTokens: total.reasoningOutputTokens + addition.reasoningOutputTokens,
+    totalTokens: total.totalTokens + addition.totalTokens,
+    cacheCreationInputTokens: (total.cacheCreationInputTokens ?? 0) + (addition.cacheCreationInputTokens ?? 0),
+  };
+}
+
+function subtractTokenUsage(current: TokenUsage, previous: TokenUsage): TokenUsage {
+  const currentFields = [
+    current.inputTokens,
+    current.cachedInputTokens,
+    current.cacheCreationInputTokens ?? 0,
+    current.outputTokens,
+    current.reasoningOutputTokens,
+    current.totalTokens,
+  ];
+  const previousFields = [
+    previous.inputTokens,
+    previous.cachedInputTokens,
+    previous.cacheCreationInputTokens ?? 0,
+    previous.outputTokens,
+    previous.reasoningOutputTokens,
+    previous.totalTokens,
+  ];
+  const reset = currentFields.some((value, index) => value < previousFields[index]!);
+  const delta = (value: number, index: number): number => reset ? value : Math.max(0, value - previousFields[index]!);
+  const cacheCreationInputTokens = delta(currentFields[2]!, 2);
+  return {
+    inputTokens: delta(currentFields[0]!, 0),
+    cachedInputTokens: delta(currentFields[1]!, 1),
+    outputTokens: delta(currentFields[3]!, 3),
+    reasoningOutputTokens: delta(currentFields[4]!, 4),
+    totalTokens: delta(currentFields[5]!, 5),
+    ...(cacheCreationInputTokens > 0 || current.cacheCreationInputTokens !== undefined
+      ? { cacheCreationInputTokens }
+      : {}),
+  };
 }
 
 function warning(
@@ -118,7 +184,8 @@ async function parseCodexFile(
     return { matched: false, skipped: true, warnings };
   }
 
-  let scope: SessionSummary["workingDirectoryRelation"] | null | undefined;
+  let currentScope: SessionSummary["workingDirectoryRelation"] | null | undefined;
+  let matchedScope: SessionSummary["workingDirectoryRelation"] | null = null;
   let rawSessionId: string | null = null;
   let providerName = "unknown";
   let firstTimestamp: string | null = null;
@@ -135,7 +202,11 @@ async function parseCodexFile(
   let responseUserMessages = 0;
   let eventAssistantMessages = 0;
   let responseAssistantMessages = 0;
-  let latestTokenUsage: TokenUsage | null = null;
+  let sessionTokenUsage: TokenUsage | null = null;
+  let activeModel: string | null = null;
+  let sessionModel: string | null = null;
+  let previousCumulativeUsage: TokenUsage | null = null;
+  let previousUsageFingerprint: string | null = null;
   const toolCounts = new Map<string, number>();
   const modelCounts: ModelCounts = new Map();
 
@@ -147,56 +218,114 @@ async function parseCodexFile(
       record = parsed;
     } catch {
       invalidJson = true;
-      return scope !== undefined || ordinal < MAX_DISCOVERY_LINES;
+      return true;
     }
 
     const timestamp = isoTimestamp(record.timestamp);
-    if (record.timestamp !== undefined && timestamp === null) invalidTimestamp = true;
-    if (timestamp) {
-      if (firstTimestamp === null || timestamp < firstTimestamp) {
-        firstTimestamp = timestamp;
-        firstMarker = { ordinal, timestamp };
-      }
-      if (lastTimestamp === null || timestamp > lastTimestamp) {
-        lastTimestamp = timestamp;
-        lastMarker = { ordinal, timestamp };
-      }
-    }
-
     const recordType = asString(record.type);
     const payload = asRecord(record.payload) ?? {};
     const payloadType = asString(payload.type);
+    let metadataTimestamp: string | null = null;
 
     if (recordType === "session_meta") {
       sawMetadata = true;
-      rawSessionId = asString(payload.id) ?? rawSessionId;
+      rawSessionId = rawSessionId ?? asString(payload.id) ?? asString(payload.session_id);
       providerName = asString(payload.model_provider) ?? providerName;
-      const metadataTimestamp = isoTimestamp(payload.timestamp);
-      if (metadataTimestamp) {
-        firstTimestamp = firstTimestamp === null || metadataTimestamp < firstTimestamp ? metadataTimestamp : firstTimestamp;
-      }
+      sessionModel = asString(payload.model) ?? sessionModel;
+      metadataTimestamp = isoTimestamp(payload.timestamp);
       const cwd = asString(payload.cwd);
-      if (cwd) scope = relationToRepository(context.repositoryRoot, cwd);
-    } else if (scope === undefined && recordType === "turn_context") {
+      if (cwd) currentScope = relationToRepository(context.repositoryRoot, cwd);
+    } else if (recordType === "turn_context") {
       const cwd = asString(payload.cwd);
-      if (cwd) scope = relationToRepository(context.repositoryRoot, cwd);
+      if (cwd) currentScope = relationToRepository(context.repositoryRoot, cwd);
     }
 
-    if (scope === null) return false;
-    if (scope === undefined && ordinal >= MAX_DISCOVERY_LINES) return false;
-    if (scope === undefined) return true;
+    const inRepository = currentScope === "repository-root" || currentScope === "subdirectory";
+    if (inRepository) {
+      if (currentScope === "repository-root") matchedScope = "repository-root";
+      else if (matchedScope !== "repository-root") matchedScope = "subdirectory";
+      if (record.timestamp !== undefined && timestamp === null) invalidTimestamp = true;
+      const observedTimestamp = metadataTimestamp ?? timestamp;
+      if (observedTimestamp) {
+        if (firstTimestamp === null || observedTimestamp < firstTimestamp) {
+          firstTimestamp = observedTimestamp;
+          firstMarker = { ordinal, timestamp: observedTimestamp };
+        }
+        if (lastTimestamp === null || observedTimestamp > lastTimestamp) {
+          lastTimestamp = observedTimestamp;
+          lastMarker = { ordinal, timestamp: observedTimestamp };
+        }
+      }
+    }
 
     if (recordType === "turn_context") {
       const rawModel = asString(payload.model);
       if (rawModel) {
         const model = context.redactor.cleanMetadata(rawModel, 160);
-        const provider = context.redactor.cleanMetadata(providerName, 80);
-        const existing = modelCounts.get(model);
-        modelCounts.set(model, { provider, turns: (existing?.turns ?? 0) + 1, tokenUsage: existing?.tokenUsage ?? null });
+        activeModel = model;
+        if (inRepository) {
+          const provider = context.redactor.cleanMetadata(providerName, 80);
+          const existing = modelCounts.get(model);
+          modelCounts.set(model, {
+            provider,
+            turns: existing?.turns ?? 0,
+            tokenUsage: existing?.tokenUsage ?? null,
+            costNanoUsd: existing?.costNanoUsd ?? null,
+          });
+        }
       }
     }
 
     if (recordType === "event_msg") {
+      if (payloadType === "token_count") {
+        // Track cumulative counters even while the conversation is outside
+        // this repository. If a Voice thread later changes cwd into the
+        // project, only the post-transition delta belongs to the project.
+        const info = asRecord(payload.info);
+        const lastUsage = info ? parseTokenUsage({ info: { last_token_usage: info.last_token_usage } }) : null;
+        const cumulativeUsage = info ? parseTokenUsage({ info: { total_token_usage: info.total_token_usage } }) : parseTokenUsage(payload);
+        const cumulativeFingerprint = cumulativeUsage ? usageFingerprint(cumulativeUsage) : null;
+        if (cumulativeFingerprint && cumulativeFingerprint === previousUsageFingerprint) return true;
+
+        let acceptedUsage: TokenUsage | null = null;
+        if (lastUsage) {
+          acceptedUsage = lastUsage;
+        } else if (cumulativeUsage) {
+          acceptedUsage = subtractTokenUsage(cumulativeUsage, previousCumulativeUsage ?? {
+            inputTokens: 0,
+            cachedInputTokens: 0,
+            outputTokens: 0,
+            reasoningOutputTokens: 0,
+            totalTokens: 0,
+          });
+        }
+        if (cumulativeUsage) {
+          previousCumulativeUsage = cumulativeUsage;
+          previousUsageFingerprint = cumulativeFingerprint;
+        } else if (acceptedUsage) {
+          const fingerprint = usageFingerprint(acceptedUsage);
+          if (fingerprint === previousUsageFingerprint) return true;
+          previousUsageFingerprint = fingerprint;
+        }
+        if (!inRepository || !acceptedUsage || acceptedUsage.totalTokens <= 0) return true;
+
+        const model = activeModel ?? sessionModel ?? "unknown-model";
+        const provider = context.redactor.cleanMetadata(providerName, 80);
+        const existing = modelCounts.get(model);
+        const costNanoUsd = estimateUsageCostNanoUsd(model, acceptedUsage, timestamp ?? DEFAULT_TOKEN_TIMESTAMP);
+        modelCounts.set(model, {
+          provider,
+          turns: (existing?.turns ?? 0) + 1,
+          tokenUsage: addTokenUsage(existing?.tokenUsage ?? null, acceptedUsage),
+          costNanoUsd: costNanoUsd === null
+            ? existing?.costNanoUsd ?? null
+            : (existing?.costNanoUsd ?? 0) + costNanoUsd,
+        });
+        sessionTokenUsage = addTokenUsage(sessionTokenUsage, acceptedUsage);
+        return true;
+      }
+
+      if (!inRepository) return true;
       if (payloadType === "user_message") {
         eventUserMessages += 1;
         context.redactor.recordTranscriptBodyDiscarded();
@@ -209,11 +338,10 @@ async function parseCodexFile(
         completed = true;
       } else if (payloadType === "turn_aborted" || payloadType === "task_aborted") {
         aborted = true;
-      } else if (payloadType === "token_count") {
-        latestTokenUsage = parseTokenUsage(payload) ?? latestTokenUsage;
       }
     }
 
+    if (!inRepository) return true;
     if (recordType === "response_item") {
       if (payloadType === "message") {
         const role = asString(payload.role);
@@ -247,7 +375,7 @@ async function parseCodexFile(
     return true;
   });
 
-  if (scope !== "repository-root" && scope !== "subdirectory") {
+  if (matchedScope !== "repository-root" && matchedScope !== "subdirectory") {
     if (!sawMetadata) {
       warnings.push(warning("SESSION_MISSING_METADATA", "info", "A Codex JSONL file had no repository-scoping metadata in its discovery prefix."));
     }
@@ -276,17 +404,10 @@ async function parseCodexFile(
   if (modelCounts.size === 0) {
     warnings.push(warning("SESSION_MODEL_UNKNOWN", "info", "No model identifier was present in the session metadata.", sessionRef));
   }
-  // Codex's token_count events are a cumulative session-wide snapshot, never
-  // tied to a specific model event, so a session's tokens can only be
-  // attributed to one model: whichever had the most turns (alphabetical
-  // tie-break for determinism). Sessions that never switch models - the
-  // common case - are exact; only multi-model sessions are approximated.
-  if (latestTokenUsage && modelCounts.size > 0) {
-    const [dominantModel] = [...modelCounts.entries()].sort(
-      (left, right) => right[1].turns - left[1].turns || compareStrings(left[0], right[0]),
-    )[0]!;
-    const dominant = modelCounts.get(dominantModel)!;
-    modelCounts.set(dominantModel, { ...dominant, tokenUsage: latestTokenUsage });
+  if (sessionTokenUsage === null && modelCounts.size > 0) {
+    // A session can expose model contexts without any completed response.
+    // Keep those model references for attribution, but do not fabricate calls.
+    for (const [model, value] of modelCounts) modelCounts.set(model, { ...value, turns: 0, tokenUsage: null, costNanoUsd: null });
   }
   const status: SessionStatus = aborted ? "aborted" : completed ? "completed" : "incomplete";
   if (status === "incomplete" && located.kind === "active") {
@@ -330,14 +451,14 @@ async function parseCodexFile(
         startedAt: firstTimestamp,
         endedAt: lastTimestamp,
         status,
-        workingDirectoryRelation: scope,
+        workingDirectoryRelation: matchedScope,
         summary: summaryText,
         turns,
         assistantMessages,
         toolCalls,
         modelRefs: [...modelCounts.keys()].sort(compareStrings),
         toolRefs: [...toolCounts.keys()].sort(compareStrings),
-        tokenUsage: latestTokenUsage,
+        tokenUsage: sessionTokenUsage,
       },
       toolCounts,
       modelCounts,
@@ -497,7 +618,7 @@ export class CodexSessionAdapter implements SessionProviderAdapter {
 
   public async readEvents(
     session: ProviderSession,
-    _context: ProviderDiscoveryContext,
+    context: ProviderDiscoveryContext,
   ): Promise<NormalizedConversationEvent[]> {
     if (!session.sourceFilePath) return [];
     const sessionRef = session.summary.sessionRef;
@@ -510,6 +631,7 @@ export class CodexSessionAdapter implements SessionProviderAdapter {
     const responseSourced: NormalizedConversationEvent[] = [];
     const toolCalls: NormalizedConversationEvent[] = [];
     let ordinal = 0;
+    let currentScope: SessionSummary["workingDirectoryRelation"] | null | undefined;
 
     await consumeJsonLines(session.sourceFilePath, (line) => {
       let record: JsonRecord;
@@ -524,6 +646,11 @@ export class CodexSessionAdapter implements SessionProviderAdapter {
       const recordType = asString(record.type);
       const payload = asRecord(record.payload) ?? {};
       const payloadType = asString(payload.type);
+      if (recordType === "session_meta" || recordType === "turn_context") {
+        const cwd = asString(payload.cwd);
+        if (cwd) currentScope = relationToRepository(context.repositoryRoot, cwd);
+      }
+      if (currentScope !== "repository-root" && currentScope !== "subdirectory") return true;
 
       if (recordType === "event_msg") {
         if (payloadType === "user_message") {

@@ -55,8 +55,38 @@ test("falls back to the base cache-write rate when no 1h/5m split is reported", 
 
 test("prices OpenAI-style cached input via cachedInputTokens, distinct from base input", () => {
   // gpt-5: input $1.25/M, cacheRead $0.125/M.
-  const cost = estimateSessionCostMicroUsd("gpt-5-codex", usage({ inputTokens: 1_000_000, cachedInputTokens: 1_000_000 }));
-  assert.equal(cost, 1_250_000 + 125_000);
+  const cost = estimateSessionCostMicroUsd("gpt-5-codex", usage({ cachedInputTokens: 1_000_000 }));
+  assert.equal(cost, 125_000);
+});
+
+test("prices GPT-5.6 Sol cache buckets and does not charge reasoning twice", () => {
+  const cost = estimateSessionCostMicroUsd(
+    "gpt-5.6-sol",
+    usage({ inputTokens: 100_000, cachedInputTokens: 100_000, outputTokens: 1_000_000, reasoningOutputTokens: 1_000_000 }),
+    "2026-08-06T00:00:00Z",
+  );
+  assert.equal(cost, 500_000 + 50_000 + 30_000_000);
+});
+
+test("applies GPT-5.6 long-context multipliers to the whole request", () => {
+  const cost = estimateSessionCostMicroUsd(
+    "gpt-5.6-sol",
+    usage({ inputTokens: 272_001, cachedInputTokens: 1_000_000, outputTokens: 1_000_000 }),
+    "2026-08-06T00:00:00Z",
+  );
+  assert.equal(cost, Math.ceil(272_001 * 5 * 2 + 1_000_000 * 0.5 * 2 + 1_000_000 * 30 * 1.5));
+});
+
+test("uses the dated Sonnet 5 introductory rate through August 31, 2026", () => {
+  const intro = estimateSessionCostMicroUsd("claude-sonnet-5", usage({ inputTokens: 1_000_000, outputTokens: 1_000_000 }), "2026-08-31T23:59:59Z");
+  const standard = estimateSessionCostMicroUsd("claude-sonnet-5", usage({ inputTokens: 1_000_000, outputTokens: 1_000_000 }), "2026-09-01T00:00:00Z");
+  assert.equal(intro, 12_000_000);
+  assert.equal(standard, 18_000_000);
+});
+
+test("leaves GLM-5.2 explicitly unpriced", () => {
+  assert.equal(estimateSessionCostMicroUsd("glm-5.2", usage({ inputTokens: 1_000 }), "2026-08-06T00:00:00Z"), null);
+  assert.equal(isPricedModel("glm-5.2"), false);
 });
 
 test("rounds a fractional cost up so it never reads as free", () => {

@@ -7,6 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { canonicalJson } from "../src/canonical-json.js";
+import { isPromptCancellation } from "../src/cli.js";
 import { PROJECT_SNAPSHOT_SCHEMA_VERSION } from "../src/contract.js";
 import { validateProjectSnapshot } from "../src/validation.js";
 import { createLocalFixture } from "./helpers.js";
@@ -16,6 +17,14 @@ interface ProcessResult {
   stdout: string;
   stderr: string;
 }
+
+test("interactive prompt cancellation is recognized as a controlled cancellation", () => {
+  const abortError = new Error("The operation was aborted.");
+  abortError.name = "AbortError";
+  assert.equal(isPromptCancellation(abortError), true);
+  assert.equal(isPromptCancellation(Object.assign(new Error("readline was closed"), { code: "ERR_USE_AFTER_CLOSE" })), true);
+  assert.equal(isPromptCancellation(new Error("unrelated failure")), false);
+});
 
 async function runProcess(args: string[], environment: NodeJS.ProcessEnv = {}): Promise<ProcessResult> {
   const cliPath = fileURLToPath(new URL("../src/cli.js", import.meta.url));

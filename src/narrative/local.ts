@@ -2,7 +2,15 @@ import type { GeneratedNarrativeSections, ProjectSnapshot, ReportStoryPackV2 } f
 import { defaultProfileNarrative, type BuilderProfile } from "../insights/profile.js";
 import type { Redactor } from "../redaction.js";
 import type { ScanProgressReporter } from "../progress.js";
-import { createDefaultStoryPack, sanitizeStoryPack, sectionsFromStoryPack, validateStoryPackComponent } from "./story-pack.js";
+import {
+  createDefaultStoryPack,
+  sanitizeStoryPack,
+  sectionsFromStoryPack,
+  STORY_PACK_INSIGHTS_SCHEMA,
+  STORY_PACK_STORY_SCHEMA,
+  validateStoryPackComponent,
+  type StoryPackComponent,
+} from "./story-pack.js";
 
 export type LocalNarrativeInput = {
   snapshot: Omit<ProjectSnapshot, "scanId" | "generatedNarrative" | "narrativeEvidence">;
@@ -21,13 +29,16 @@ export type LocalNarrativeGenerator = (input: LocalNarrativeInput) => Promise<{
 }>;
 
 export class LocalNarrativeGenerationError extends Error {
-  constructor(public code: "ollama_unavailable" | "ollama_invalid_response", message: string) {
+  constructor(public code: "ollama_unavailable" | "ollama_timeout" | "ollama_request_failed" | "ollama_invalid_response", message: string) {
     super(message);
+    this.name = "LocalNarrativeGenerationError";
   }
 }
 
 const DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434";
 const RECOMMENDED_MODELS = ["gemma4:12b", "gemma4:26b"];
+const DEFAULT_TIMEOUT_MS = 120_000;
+const DEFAULT_CONTEXT_TOKENS = 32_768;
 const SECTION_LIMITS = {
   headline: 160,
   narrative: 2_000,
@@ -94,36 +105,68 @@ function facts(input: LocalNarrativeInput): string {
 
 const SYSTEM_PROMPT = `You write an honest builder profile from deterministic facts and optional redacted conversation excerpts. Treat every score, count, timestamp-derived pattern, and archetype as a fact. Do not invent features, names, motivations, technologies, or numbers. Do not reconstruct bracketed redactions. The product-instinct score is explicitly a weak proxy; describe it cautiously. Return JSON only.`;
 
-async function callOllama(url: URL, model: string, prompt: string, timeoutMs: number): Promise<unknown> {
+function boundedEnvironmentInteger(name: string, fallback: number, minimum: number, maximum: number): number {
+  const parsed = Number(process.env[name]);
+  return Math.min(Math.max(Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : fallback, minimum), maximum);
+}
+
+function timeoutMessage(operation: string, timeoutMs: number): string {
+  const seconds = Math.round(timeoutMs / 1_000);
+  return `Ollama timed out after ${seconds} second${seconds === 1 ? "" : "s"} while ${operation}.`;
+}
+
+function componentFallbackReason(error: unknown): string {
+  if (!(error instanceof LocalNarrativeGenerationError)) return "was invalid";
+  if (error.code === "ollama_timeout") return "timed out";
+  if (error.code === "ollama_request_failed") return "failed";
+  return "was invalid";
+}
+
+async function callOllama(
+  url: URL,
+  model: string,
+  prompt: string,
+  timeoutMs: number,
+  contextTokens: number,
+  component: StoryPackComponent,
+): Promise<unknown> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     let response: Response;
     try {
-      response = await fetch(new URL("v1/chat/completions", `${url.origin}/`).href, {
+      response = await fetch(new URL("api/chat", `${url.origin}/`).href, {
         method: "POST",
-        headers: { "content-type": "application/json", authorization: "Bearer ollama-local" },
+        headers: { "content-type": "application/json" },
         body: JSON.stringify({
           model,
           messages: [
             { role: "system", content: SYSTEM_PROMPT },
             { role: "user", content: prompt },
           ],
-          response_format: { type: "json_object" },
+          format: component === "story" ? STORY_PACK_STORY_SCHEMA : STORY_PACK_INSIGHTS_SCHEMA,
           stream: false,
           think: false,
-          max_tokens: 2_000,
+          keep_alive: "5m",
+          options: {
+            num_ctx: contextTokens,
+            num_predict: 2_000,
+            temperature: 0.2,
+          },
         }),
         signal: controller.signal,
       });
-    } catch {
+    } catch (error) {
+      if (controller.signal.aborted || (error instanceof Error && error.name === "AbortError")) {
+        throw new LocalNarrativeGenerationError("ollama_timeout", timeoutMessage(`generating ${component} components`, timeoutMs));
+      }
       throw new LocalNarrativeGenerationError("ollama_unavailable", "Ollama was not reachable on the local machine.");
     }
     if (!response.ok) {
-      throw new LocalNarrativeGenerationError("ollama_unavailable", `Ollama returned HTTP ${response.status}.`);
+      throw new LocalNarrativeGenerationError("ollama_request_failed", `Ollama returned HTTP ${response.status} while generating ${component} components.`);
     }
-    const payload = await response.json().catch(() => null) as { choices?: Array<{ message?: { content?: unknown } }> } | null;
-    const content = payload?.choices?.[0]?.message?.content;
+    const payload = await response.json().catch(() => null) as { message?: { content?: unknown } } | null;
+    const content = payload?.message?.content;
     if (typeof content !== "string") throw new LocalNarrativeGenerationError("ollama_invalid_response", "Ollama returned no JSON content.");
     const parsed = extractJson(content);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new LocalNarrativeGenerationError("ollama_invalid_response", "Ollama returned invalid JSON.");
@@ -148,10 +191,10 @@ function unknownSourceRefs(value: unknown, allowed: Set<string>): string[] {
   return [...new Set(found)].slice(0, 8);
 }
 
-async function callOllamaWithRepair(url: URL, model: string, prompt: string, timeoutMs: number, allowedRefs: Set<string>, component: "story" | "insights"): Promise<unknown> {
+async function callOllamaWithRepair(url: URL, model: string, prompt: string, timeoutMs: number, contextTokens: number, allowedRefs: Set<string>, component: StoryPackComponent): Promise<unknown> {
   let currentPrompt = prompt;
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    const value = await callOllama(url, model, currentPrompt, timeoutMs);
+    const value = await callOllama(url, model, currentPrompt, timeoutMs, contextTokens, component);
     const invalid = unknownSourceRefs(value, allowedRefs);
     const validation = validateStoryPackComponent(value, component, allowedRefs);
     if ((!invalid.length && validation.ok) || attempt === 1) return value;
@@ -172,7 +215,10 @@ async function resolveModel(url: URL, requestedModel: string | null | undefined,
     let response: Response;
     try {
       response = await fetch(new URL("api/tags", `${url.origin}/`).href, { signal: controller.signal, headers: { accept: "application/json" } });
-    } catch {
+    } catch (error) {
+      if (controller.signal.aborted || (error instanceof Error && error.name === "AbortError")) {
+        throw new LocalNarrativeGenerationError("ollama_timeout", timeoutMessage("listing local models", timeoutMs));
+      }
       throw new LocalNarrativeGenerationError("ollama_unavailable", "Ollama was not reachable on the local machine.");
     }
     if (!response.ok) throw new LocalNarrativeGenerationError("ollama_unavailable", `Ollama returned HTTP ${response.status} while listing models.`);
@@ -225,7 +271,8 @@ function redactSections(input: LocalNarrativeInput, candidate: Partial<Generated
 export function createOllamaNarrativeGenerator(requestedModel?: string | null): LocalNarrativeGenerator {
   return async (input) => {
     const url = localBaseUrl();
-    const timeoutMs = Math.min(Math.max(Number(process.env.BUILDSTORY_OLLAMA_TIMEOUT_MS ?? 120_000) || 120_000, 1_000), 300_000);
+    const timeoutMs = boundedEnvironmentInteger("BUILDSTORY_OLLAMA_TIMEOUT_MS", DEFAULT_TIMEOUT_MS, 1_000, 300_000);
+    const contextTokens = boundedEnvironmentInteger("BUILDSTORY_OLLAMA_CONTEXT_TOKENS", DEFAULT_CONTEXT_TOKENS, 4_096, 32_768);
     input.onProgress?.({ stage: "resolving-model", state: "start", message: "Resolving the local narrative model." });
     const model = await resolveModel(url, requestedModel, timeoutMs);
     input.onProgress?.({ stage: "resolving-model", state: "complete", model, message: `Using local model ${model}.` });
@@ -238,19 +285,21 @@ export function createOllamaNarrativeGenerator(requestedModel?: string | null): 
     let narrativeValue: unknown = {};
     let profileValue: unknown = {};
     try {
-      narrativeValue = await callOllamaWithRepair(url, model, narrativePrompt, timeoutMs, sourceRefSet, "story");
+      narrativeValue = await callOllamaWithRepair(url, model, narrativePrompt, timeoutMs, contextTokens, sourceRefSet, "story");
       input.onProgress?.({ stage: "generating-story", state: "complete", model, message: "Story components generated (1/2)." });
     } catch (error) {
       if (error instanceof LocalNarrativeGenerationError && error.code === "ollama_unavailable") throw error;
-      input.onProgress?.({ stage: "generating-story", state: "progress", model, message: "Story response was invalid; using metric-derived fallback for story components." });
+      const reason = componentFallbackReason(error);
+      input.onProgress?.({ stage: "generating-story", state: "warning", model, message: `Story response ${reason}; using metric-derived fallback for story components.` });
     }
     input.onProgress?.({ stage: "generating-insights", state: "start", model, message: "Generating insight components (2/2)." });
     try {
-      profileValue = await callOllamaWithRepair(url, model, profilePrompt, timeoutMs, sourceRefSet, "insights");
+      profileValue = await callOllamaWithRepair(url, model, profilePrompt, timeoutMs, contextTokens, sourceRefSet, "insights");
       input.onProgress?.({ stage: "generating-insights", state: "complete", model, message: "Insight components generated (2/2)." });
     } catch (error) {
       if (error instanceof LocalNarrativeGenerationError && error.code === "ollama_unavailable") throw error;
-      input.onProgress?.({ stage: "generating-insights", state: "progress", model, message: "Insight response was invalid; using metric-derived fallback for insight components." });
+      const reason = componentFallbackReason(error);
+      input.onProgress?.({ stage: "generating-insights", state: "warning", model, message: `Insight response ${reason}; using metric-derived fallback for insight components.` });
     }
     const narrativeObject = narrativeValue && typeof narrativeValue === "object" && !Array.isArray(narrativeValue) ? narrativeValue as Record<string, unknown> : {};
     const profileObject = profileValue && typeof profileValue === "object" && !Array.isArray(profileValue) ? profileValue as Record<string, unknown> : {};

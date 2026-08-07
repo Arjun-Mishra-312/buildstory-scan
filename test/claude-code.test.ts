@@ -4,9 +4,11 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { canonicalJson } from "../src/canonical-json.js";
+import type { ProjectSnapshot } from "../src/contract.js";
 import { SESSION_PRICING_TABLE_VERSION } from "../src/session-pricing.js";
 import { buildProjectSnapshot } from "../src/scanner.js";
 import { createOllamaNarrativeGenerator } from "../src/narrative/local.js";
+import { createDefaultStoryPack, sectionsFromStoryPack } from "../src/narrative/story-pack.js";
 import { validateProjectSnapshot } from "../src/validation.js";
 import { createLocalFixture, encodedClaudeCodeProjectDirectory } from "./helpers.js";
 
@@ -225,6 +227,44 @@ test("local narrative generation stays content-free at the upload boundary and r
   }
 });
 
+test("structured story-pack decisions are bounded when projected into legacy sections", async () => {
+  const fixture = await createLocalFixture();
+  try {
+    const snapshot = await buildProjectSnapshot({
+      repositoryPath: fixture.repository,
+      consent: "local-scan",
+      providers: ["claude-code"],
+      claudeCodeHome: fixture.claudeCodeHome,
+      since: "2026-08-03T00:00:00Z",
+      until: "2026-08-04T00:00:00Z",
+      narrative: { mode: "local", model: "fixture-local" },
+      narrativeGenerator: async ({ snapshot: sourceSnapshot, profile }) => {
+        const storyPack = createDefaultStoryPack(sourceSnapshot as ProjectSnapshot, profile, []);
+        storyPack.decisions = Array.from({ length: 3 }, (_, index) => ({
+          title: `${index + 1}`.repeat(120),
+          rationale: "R".repeat(300),
+          outcome: "O".repeat(300),
+          sourceRefs: storyPack.decisions[0]?.sourceRefs ?? [],
+        }));
+        return {
+          provider: "ollama" as const,
+          model: "fixture-local",
+          sections: sectionsFromStoryPack(storyPack),
+          storyPack,
+          fallbacksUsed: [],
+        };
+      },
+    });
+    validateProjectSnapshot(snapshot);
+    assert.equal(snapshot.generatedNarrative?.sections.decisionPatterns.length, 3);
+    assert.ok(snapshot.generatedNarrative?.sections.decisionPatterns.every((item) => item.length <= 300));
+    assert.equal(snapshot.generatedNarrative?.storyPack?.decisions[0]?.rationale.length, 300);
+    assert.equal(snapshot.generatedNarrative?.storyPack?.decisions[0]?.outcome.length, 300);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test("the Ollama generator uses only loopback HTTP and splits narrative/profile calls", async () => {
   const fixture = await createLocalFixture();
   const originalFetch = globalThis.fetch;
@@ -252,7 +292,7 @@ test("the Ollama generator uses only loopback HTTP and splits narrative/profile 
           standoutTraits: ["Keeps the feedback loop tight."],
           growthEdge: "Validate the weak product-instinct proxy with more evidence.",
         };
-    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(response) } }] }), { status: 200 });
+    return new Response(JSON.stringify({ message: { content: JSON.stringify(response) } }), { status: 200 });
   }) as typeof fetch;
   try {
     const snapshot = await buildProjectSnapshot({
@@ -270,12 +310,81 @@ test("the Ollama generator uses only loopback HTTP and splits narrative/profile 
     assert.equal(completionCalls, 2);
     assert.equal(requests.length, 3);
     assert.ok(requests.every((request) => request.url.startsWith("http://127.0.0.1:11434/")));
+    assert.ok(requests.slice(1).every((request) => request.url.endsWith("/api/chat")));
+    const requestBody = JSON.parse(requests[1]?.body ?? "{}") as {
+      format?: { type?: unknown };
+      options?: { num_ctx?: unknown; num_predict?: unknown };
+    };
+    assert.equal(requestBody.format?.type, "object");
+    assert.equal(requestBody.options?.num_ctx, 32_768);
+    assert.equal(requestBody.options?.num_predict, 2_000);
     assert.equal(requests.some((request) => request.body.includes("/Users/")), false);
     assert.doesNotMatch(snapshot.generatedNarrative?.sections.turningPoint ?? "", /app\/api\/route\.ts|secret\.example\.invalid/);
   } finally {
     globalThis.fetch = originalFetch;
     if (originalBaseUrl === undefined) delete process.env.BUILDSTORY_OLLAMA_BASE_URL;
     else process.env.BUILDSTORY_OLLAMA_BASE_URL = originalBaseUrl;
+    await fixture.cleanup();
+  }
+});
+
+test("an Ollama generation timeout falls back only the affected story component", async () => {
+  const fixture = await createLocalFixture();
+  const originalFetch = globalThis.fetch;
+  const originalBaseUrl = process.env.BUILDSTORY_OLLAMA_BASE_URL;
+  const originalTimeout = process.env.BUILDSTORY_OLLAMA_TIMEOUT_MS;
+  let completionCalls = 0;
+  const progressMessages: string[] = [];
+  process.env.BUILDSTORY_OLLAMA_BASE_URL = "http://127.0.0.1:11434";
+  process.env.BUILDSTORY_OLLAMA_TIMEOUT_MS = "1000";
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    if (url.endsWith("/api/tags")) {
+      return new Response(JSON.stringify({ models: [{ name: "gemma4:12b" }] }), { status: 200 });
+    }
+    completionCalls += 1;
+    if (completionCalls === 1) {
+      return await new Promise<Response>((_resolve, reject) => {
+        const signal = init?.signal;
+        if (!signal) {
+          reject(new Error("Expected an abort signal."));
+          return;
+        }
+        const rejectAsAborted = () => reject(new DOMException("The operation was aborted.", "AbortError"));
+        if (signal.aborted) rejectAsAborted();
+        else signal.addEventListener("abort", rejectAsAborted, { once: true });
+      });
+    }
+    const response = {
+      decisionPatterns: ["Review before shipping."],
+      standoutTraits: ["Keeps the feedback loop tight."],
+      growthEdge: "Validate the weak product-instinct proxy with more evidence.",
+    };
+    return new Response(JSON.stringify({ message: { content: JSON.stringify(response) } }), { status: 200 });
+  }) as typeof fetch;
+  try {
+    const snapshot = await buildProjectSnapshot({
+      repositoryPath: fixture.repository,
+      consent: "local-scan",
+      providers: ["claude-code"],
+      claudeCodeHome: fixture.claudeCodeHome,
+      since: "2026-08-03T00:00:00Z",
+      until: "2026-08-04T00:00:00Z",
+      narrative: { mode: "local" },
+      narrativeGenerator: createOllamaNarrativeGenerator(),
+      onProgress: (event) => progressMessages.push(event.message ?? ""),
+    });
+    assert.equal(completionCalls, 2);
+    assert.equal(snapshot.generatedNarrative?.model, "gemma4:12b");
+    assert.ok(snapshot.generatedNarrative?.fallbacksUsed.some((path) => path.startsWith("hero.")));
+    assert.ok(progressMessages.some((message) => /Story response timed out; using metric-derived fallback/.test(message)));
+    validateProjectSnapshot(snapshot);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalBaseUrl === undefined) delete process.env.BUILDSTORY_OLLAMA_BASE_URL;
+    else process.env.BUILDSTORY_OLLAMA_BASE_URL = originalBaseUrl;
+    if (originalTimeout === undefined) delete process.env.BUILDSTORY_OLLAMA_TIMEOUT_MS;
+    else process.env.BUILDSTORY_OLLAMA_TIMEOUT_MS = originalTimeout;
     await fixture.cleanup();
   }
 });
@@ -339,6 +448,19 @@ test("a session that switches Claude models attributes tokens and cost to each m
           usage: { input_tokens: 2_000_000, output_tokens: 2_000_000 },
         },
       },
+      {
+        type: "assistant",
+        sessionId,
+        cwd: repository,
+        timestamp: "2026-08-03T10:00:04Z",
+        message: {
+          role: "assistant",
+          model: "<synthetic>",
+          stop_reason: "stop_sequence",
+          content: [{ type: "text", text: "local bookkeeping message" }],
+          usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+        },
+      },
     ];
     await writeFile(
       path.join(projectDirectory, `${sessionId}.jsonl`),
@@ -361,6 +483,9 @@ test("a session that switches Claude models attributes tokens and cost to each m
     const opus = byName.get("claude-opus-4-1-20250805");
     assert.ok(sonnet);
     assert.ok(opus);
+    assert.equal(byName.has("<synthetic>"), false);
+    assert.equal(snapshot.sessions[0]?.assistantMessages, 2);
+    assert.equal(snapshot.usage.models.reduce((sum, model) => sum + model.turnCount, 0), 2);
 
     // Each model's tokens are exactly its own message's usage, not blended
     // with the other model's - and priced at that model's own rate.
