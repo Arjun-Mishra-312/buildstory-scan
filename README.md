@@ -4,21 +4,21 @@ BuildStory Scanner is a TypeScript/Node.js CLI for a desktop-first community of 
 
 The CLI provides a real end-to-end transport to a BuildStory web app: a separately running **local** app by default, or a single explicitly pinned **HTTPS remote host** per connection (`--remote`, or `--api-base-url`/`--allow-host` for a non-default host). No unpinned or discovered remote endpoint is accepted.
 
-The package is published as **`@buildstory/scanner`** and installs a single binary, **`buildstory-scan`**. In the consolidated repository, source lives at `packages/buildstory-scanner` and the web app lives at `apps/buildstory-web`.
+The package is published as **`buildstory-scan`** and installs a single binary of the same name, so the thing you install, the thing you run, and the thing you `npx` are all one word. In the consolidated repository, source lives at `packages/buildstory-scanner` and the web app lives at `apps/buildstory-web`.
 
 ## Install
 
 Requirements: Node.js 22.5+ and Git.
 
 ```powershell
-npm install --global '@buildstory/scanner'
+npm install --global 'buildstory-scan'
 buildstory-scan --version
 ```
 
 Or run it without installing:
 
 ```powershell
-npx @buildstory/scanner --version
+npx buildstory-scan --version
 ```
 
 From this source directory:
@@ -44,8 +44,8 @@ Get-Command buildstory-scan
 
 Never advertise `npx buildstory` or `npx story-scanner`. Both names belong to
 unrelated packages already on the public registry, so either would run someone
-else's code. The only correct forms are `npx @buildstory/scanner` and the
-installed `buildstory-scan` binary.
+else's code. `buildstory-scan` is the only correct name — as the package, as
+the binary, and as the `npx` target.
 
 If PowerShell says `buildstory-scan` is not recognized, add npm's global command directory to this session:
 
@@ -173,7 +173,7 @@ Recommended PowerShell copy for the local demo:
 
 ```text
 Install the CLI first (Node.js 22.5+):
-  npm install --global "@buildstory/scanner"
+  npm install --global "buildstory-scan"
 
 With the local BuildStory web app running:
   buildstory-scan connect "UPLOAD_SESSION_ID" --code "DEVICE_CODE" --api-base-url "http://127.0.0.1:3000/"
