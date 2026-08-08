@@ -9,6 +9,7 @@ import type {
   QualityWarning,
   TimeWindow,
   TokenUsage,
+  UsageCoverage,
   UsageSummary,
 } from "./contract.js";
 import {
@@ -39,7 +40,6 @@ import type { ScanProgressReporter } from "./progress.js";
 import { createDefaultStoryPack, sanitizeStoryPack, sectionsFromStoryPack } from "./narrative/story-pack.js";
 import { estimateSessionCostMicroUsd, SESSION_PRICING_TABLE_VERSION } from "./session-pricing.js";
 
-const DEFAULT_LOOKBACK_MILLISECONDS = 30 * 24 * 60 * 60 * 1_000;
 const UNIX_EPOCH = "1970-01-01T00:00:00.000Z";
 
 export interface ScanOptions {
@@ -104,6 +104,11 @@ function maximum(values: Array<string | null>): string | null {
   return present.at(-1) ?? null;
 }
 
+function minimum(values: Array<string | null>): string | null {
+  const present = values.filter((value): value is string => value !== null).sort(compareStrings);
+  return present.at(0) ?? null;
+}
+
 function deriveTimeWindow(
   options: Pick<ScanOptions, "since" | "until" | "utcOffsetMinutes">,
   sessions: ProviderSession[],
@@ -120,12 +125,13 @@ function deriveTimeWindow(
   if (explicitStart) {
     start = explicitStart;
     startBasis = "explicit";
-  } else if (!explicitEnd && latestSession === null && headTimestamp === null) {
-    start = UNIX_EPOCH;
-    startBasis = "empty-repository";
   } else {
-    start = new Date(new Date(end).getTime() - DEFAULT_LOOKBACK_MILLISECONDS).toISOString();
-    startBasis = "default-lookback";
+    // No --since: default to the full observed history rather than a
+    // rolling lookback window, so a build receipt never silently drops
+    // older, real spend. Earliest session start, or the epoch when there
+    // are no sessions yet.
+    start = minimum(sessions.map((session) => session.summary.startedAt)) ?? UNIX_EPOCH;
+    startBasis = "full-history";
   }
 
   if (start > end) {
@@ -211,14 +217,19 @@ function safeSum(left: number, right: number): number {
   return Math.min(Number.MAX_SAFE_INTEGER, left + right);
 }
 
-function aggregateUsage(sessions: ProviderSession[]): UsageSummary {
+/** Exported for direct unit testing of the priced/unpriced token-accounting split; not part of the CLI/library surface. */
+export function aggregateUsage(sessions: ProviderSession[]): { usage: UsageSummary; partiallyPricedModels: number } {
   const tools = new Map<string, { callCount: number; sessions: Set<string> }>();
   const models = new Map<string, {
     provider: string;
     turnCount: number;
     sessions: Set<string>;
     tokenUsage: TokenUsage[];
+    pricedTokenUsage: TokenUsage[];
+    unpricedTokenUsage: TokenUsage[];
     costNanoUsd: number | null;
+    /** Latest session activity touching this model, for the unpriced-fallback re-price below. */
+    latestEndedAt: string | null;
   }>();
   for (const session of sessions) {
     for (const [name, count] of session.toolCounts) {
@@ -234,12 +245,18 @@ function aggregateUsage(sessions: ProviderSession[]): UsageSummary {
         turnCount: 0,
         sessions: new Set<string>(),
         tokenUsage: [],
+        pricedTokenUsage: [],
+        unpricedTokenUsage: [],
         costNanoUsd: null,
+        latestEndedAt: null,
       };
       aggregate.turnCount += model.turns;
       aggregate.sessions.add(session.summary.sessionRef);
       if (model.tokenUsage) aggregate.tokenUsage.push(model.tokenUsage);
+      if (model.pricedTokenUsage) aggregate.pricedTokenUsage.push(model.pricedTokenUsage);
+      if (model.unpricedTokenUsage) aggregate.unpricedTokenUsage.push(model.unpricedTokenUsage);
       if (model.costNanoUsd !== null) aggregate.costNanoUsd = (aggregate.costNanoUsd ?? 0) + model.costNanoUsd;
+      aggregate.latestEndedAt = maximum([aggregate.latestEndedAt, session.summary.endedAt]);
       models.set(key, aggregate);
     }
   }
@@ -247,22 +264,35 @@ function aggregateUsage(sessions: ProviderSession[]): UsageSummary {
   let totalMicroUsd: number | null = null;
   let pricedTokens = 0;
   let unpricedTokens = 0;
+  let partiallyPricedModels = 0;
   const modelEntries = [...models.entries()].map(([key, value]) => {
     const name = key.slice(key.indexOf("\0") + 1);
     const tokenUsage = sumTokens(value.tokenUsage);
-    const costMicroUsd = tokenUsage
-      ? value.costNanoUsd !== null
-        ? Math.ceil(value.costNanoUsd / 1_000)
-        : estimateSessionCostMicroUsd(name, tokenUsage)
-      : null;
-    if (tokenUsage) {
-      if (costMicroUsd === null) {
-        unpricedTokens += tokenUsage.totalTokens;
-      } else {
-        pricedTokens += tokenUsage.totalTokens;
-        totalMicroUsd = (totalMicroUsd ?? 0) + costMicroUsd;
+    let pricedTokenUsage = sumTokens(value.pricedTokenUsage);
+    let unpricedTokenUsage = sumTokens(value.unpricedTokenUsage);
+    let costMicroUsd = value.costNanoUsd !== null ? Math.ceil(value.costNanoUsd / 1_000) : null;
+
+    if (costMicroUsd === null && tokenUsage) {
+      // No record for this model priced successfully via the primary,
+      // per-record-timestamp path (every record failed, e.g. every one
+      // fell outside a dated entry's effective window). Try once more
+      // against this model's own latest observed activity rather than a
+      // fixed default timestamp.
+      const fallbackMicroUsd = value.latestEndedAt
+        ? estimateSessionCostMicroUsd(name, tokenUsage, value.latestEndedAt)
+        : estimateSessionCostMicroUsd(name, tokenUsage);
+      if (fallbackMicroUsd !== null) {
+        costMicroUsd = fallbackMicroUsd;
+        pricedTokenUsage = tokenUsage;
+        unpricedTokenUsage = null;
       }
     }
+
+    if (pricedTokenUsage) pricedTokens += pricedTokenUsage.totalTokens;
+    if (unpricedTokenUsage) unpricedTokens += unpricedTokenUsage.totalTokens;
+    if (costMicroUsd !== null) totalMicroUsd = (totalMicroUsd ?? 0) + costMicroUsd;
+    if (pricedTokenUsage && unpricedTokenUsage) partiallyPricedModels += 1;
+
     return {
       provider: value.provider,
       name,
@@ -273,7 +303,7 @@ function aggregateUsage(sessions: ProviderSession[]): UsageSummary {
     };
   });
 
-  return {
+  const usage: UsageSummary = {
     tools: [...tools.entries()]
       .map(([name, value]) => ({ name, callCount: value.callCount, sessionCount: value.sessions.size }))
       .sort((left, right) => compareStrings(left.name, right.name)),
@@ -283,6 +313,7 @@ function aggregateUsage(sessions: ProviderSession[]): UsageSummary {
     tokenUsage: sumTokens(sessions.map((session) => session.summary.tokenUsage)),
     cost: { totalMicroUsd, pricedTokens, unpricedTokens, pricingTableVersion: SESSION_PRICING_TABLE_VERSION },
   };
+  return { usage, partiallyPricedModels };
 }
 
 /** Human-facing label for a provider id. Shared verbatim with the web app's deterministic-text check. */
@@ -318,7 +349,7 @@ function providerDiagnostic(adapter: SessionProviderAdapter, result: ProviderDis
  */
 export function assumptionsForProviders(providerIds: ProviderId[]): string[] {
   const assumptions = [
-    "When no explicit start is supplied, the scanner uses a deterministic 30-day lookback from the effective end.",
+    "When no explicit start is supplied, the scanner defaults to full observed history, starting at the earliest session.",
     "Git fileTouches is the sum of per-commit changed-file counts and is not a unique-file count.",
     "Estimated cost is priced from a static, versioned table of known model families; a model not in that table shows tokens only, never a guessed price.",
   ];
@@ -504,7 +535,7 @@ export async function buildProjectSnapshot(options: ScanOptions): Promise<Projec
   const includedSessionRefs = new Set(includedSessions.map((session) => session.summary.sessionRef));
   reportProgress(options, { stage: "aggregating-metrics", state: "start", message: "Aggregating Git history and usage metrics." });
   const gitResult = await collectGitMetrics(repository, timeWindow);
-  const usage = aggregateUsage(includedSessions);
+  const { usage, partiallyPricedModels } = aggregateUsage(includedSessions);
   reportProgress(options, {
     stage: "aggregating-metrics",
     state: "complete",
@@ -600,6 +631,17 @@ export async function buildProjectSnapshot(options: ScanOptions): Promise<Projec
     reportProgress(options, { stage: "selecting-evidence", state: "complete", message: `${selection.excerpts.length} redacted excerpts selected.` });
   }
 
+  const sessionsDiscovered = discoveries.reduce((sum, result) => sum + result.sessionsMatched, 0);
+  const sessionsIncluded = includedSessions.length;
+  const sessionsSkipped = sessionsDiscovered - sessionsIncluded;
+  const coverage: UsageCoverage = {
+    sessionsDiscovered,
+    sessionsIncluded,
+    sessionsSkipped,
+    skipped: sessionsSkipped > 0 ? [{ reason: "outside-window", count: sessionsSkipped }] : [],
+    partiallyPricedModels,
+  };
+
   const snapshotWithoutId: Omit<ProjectSnapshot, "scanId"> = {
     schemaVersion: PROJECT_SNAPSHOT_SCHEMA_VERSION,
     generatedAt: timeWindow.end,
@@ -635,7 +677,7 @@ export async function buildProjectSnapshot(options: ScanOptions): Promise<Projec
         compareStrings(left.summary.sessionRef, right.summary.sessionRef),
       )
       .map((session) => session.summary),
-    usage,
+    usage: { ...usage, coverage },
     git: gitResult.metrics,
     milestones: milestones.sort((left, right) => compareStrings(left.occurredAt, right.occurredAt) || compareStrings(left.milestoneId, right.milestoneId)),
     evidence: evidence.sort((left, right) => compareStrings(left.evidenceId, right.evidenceId)),

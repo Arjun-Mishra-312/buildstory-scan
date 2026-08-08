@@ -1,5 +1,5 @@
 {
-  "schemaVersion": "1.6.0",
+  "schemaVersion": "1.7.0",
   "scanId": "scan_0123456789abcdef01234567",
   "generatedAt": "2026-08-03T12:00:00.000Z",
   "sourceSelection": {
@@ -45,7 +45,7 @@
     "start": "2026-07-04T12:00:00.000Z",
     "end": "2026-08-03T12:00:00.000Z",
     "timezone": "UTC",
-    "startBasis": "default-lookback",
+    "startBasis": "full-history",
     "endBasis": "latest-session"
   },
   "sessions": [
@@ -114,6 +114,13 @@
       "pricedTokens": 0,
       "unpricedTokens": 1400,
       "pricingTableVersion": "2026-08-05.1"
+    },
+    "coverage": {
+      "sessionsDiscovered": 1,
+      "sessionsIncluded": 1,
+      "sessionsSkipped": 0,
+      "skipped": [],
+      "partiallyPricedModels": 0
     }
   },
   "git": {
@@ -214,7 +221,7 @@
     "warningCount": 0,
     "warnings": [],
     "assumptions": [
-      "When no explicit start is supplied, the scanner uses a deterministic 30-day lookback from the effective end.",
+      "When no explicit start is supplied, the scanner defaults to full observed history, starting at the earliest session.",
       "Git fileTouches is the sum of per-commit changed-file counts and is not a unique-file count.",
       "Codex sessions are repository-scoped from session or turn-context working-directory metadata.",
       "User-turn and assistant-message counts prefer event records and fall back to response records to avoid double counting."

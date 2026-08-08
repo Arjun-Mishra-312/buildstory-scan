@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://story-scanner.local/schemas/project-snapshot-1.6.0.json",
+  "$id": "https://story-scanner.local/schemas/project-snapshot-1.7.0.json",
   "title": "ProjectSnapshot",
   "description": "Privacy-preserving aggregate of repository and AI coding-session activity. Transcript bodies, tool payloads, paths, diffs, and source text are intentionally not representable.",
   "type": "object",
@@ -22,7 +22,7 @@
     "quality"
   ],
   "properties": {
-    "schemaVersion": { "const": "1.6.0" },
+    "schemaVersion": { "const": "1.7.0" },
     "scanId": { "type": "string", "pattern": "^scan_[a-f0-9]{24}$" },
     "generatedAt": { "$ref": "#/$defs/dateTime" },
     "sourceSelection": { "$ref": "#/$defs/sourceSelection" },
@@ -163,7 +163,7 @@
         "start": { "$ref": "#/$defs/dateTime" },
         "end": { "$ref": "#/$defs/dateTime" },
         "timezone": { "const": "UTC" },
-        "startBasis": { "enum": ["explicit", "default-lookback", "empty-repository"] },
+        "startBasis": { "enum": ["explicit", "full-history", "default-lookback", "empty-repository"] },
         "endBasis": { "enum": ["explicit", "latest-session", "head-commit", "unix-epoch"] },
         "utcOffsetMinutes": { "type": "integer", "minimum": -840, "maximum": 840 }
       }
@@ -286,6 +286,31 @@
             "pricedTokens": { "$ref": "#/$defs/nonNegativeInteger" },
             "unpricedTokens": { "$ref": "#/$defs/nonNegativeInteger" },
             "pricingTableVersion": { "type": "string", "minLength": 1, "maxLength": 40 }
+          }
+        },
+        "coverage": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["sessionsDiscovered", "sessionsIncluded", "sessionsSkipped", "skipped", "partiallyPricedModels"],
+          "properties": {
+            "sessionsDiscovered": { "$ref": "#/$defs/nonNegativeInteger" },
+            "sessionsIncluded": { "$ref": "#/$defs/nonNegativeInteger" },
+            "sessionsSkipped": { "$ref": "#/$defs/nonNegativeInteger" },
+            "skipped": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["reason", "count"],
+                "properties": {
+                  "reason": {
+                    "enum": ["outside-window", "no-timestamp", "duplicate-session-id", "parse-failed", "file-unreadable"]
+                  },
+                  "count": { "$ref": "#/$defs/nonNegativeInteger" }
+                }
+              }
+            },
+            "partiallyPricedModels": { "$ref": "#/$defs/nonNegativeInteger" }
           }
         }
       }

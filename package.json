@@ -1,6 +1,6 @@
 {
   "name": "buildstory-scan",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "description": "BuildStory read-only local scanner for privacy-preserving AI-assisted project snapshots.",
   "keywords": ["buildstory", "cli", "privacy", "ai-assisted-development", "read-only", "codex", "claude-code"],
   "homepage": "https://buildstory.dev",
@@ -38,6 +38,7 @@
     "test:e2e": "npm run build && node --test --test-name-pattern=\"validated one-PUT upload\" \"dist/test/cli.test.js\"",
     "buildstory": "node dist/src/cli.js",
     "scan": "node dist/src/cli.js",
+    "reconcile": "node scripts/reconcile-snapshot.mjs",
     "prepack": "npm run build"
   },
   "engines": {

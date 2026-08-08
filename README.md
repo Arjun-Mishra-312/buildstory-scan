@@ -151,7 +151,7 @@ buildstory-scan scan --repo 'C:\path\to\repository' --consent local-scan --outpu
 - `--dry-run` validates and prints the redacted payload without writing a file.
 - `--output` atomically writes a mode-0600 file where supported. Its parent must exist outside the selected repository; replacing a file requires `--overwrite`.
 
-Without an explicit end, the deterministic window uses the latest matched-session or HEAD-commit timestamp, then the Unix epoch. Without a start, it uses a 30-day lookback. Identical inputs and options produce identical canonical bytes and scan IDs.
+Without an explicit end, the deterministic window uses the latest matched-session or HEAD-commit timestamp, then the Unix epoch. Without a start, it defaults to full observed history, starting at the earliest session. Identical inputs and options produce identical canonical bytes and scan IDs.
 
 ## Contract and privacy boundary
 

@@ -6,7 +6,7 @@
 
 import type { TokenUsage } from "./contract.js";
 
-export const SESSION_PRICING_TABLE_VERSION = "2026-08-06.2-api-equivalent" as const;
+export const SESSION_PRICING_TABLE_VERSION = "2026-08-08.1-api-equivalent" as const;
 
 const DEFAULT_PRICING_TIMESTAMP = "2026-08-06T00:00:00.000Z";
 const OPENAI_LONG_CONTEXT_INPUT_TOKENS = 272_000;
@@ -51,6 +51,8 @@ const PRICING_TABLE: PricingEntry[] = [
     effectiveFrom: "2026-09-01T00:00:00.000Z",
   },
   { prefix: "claude-opus-5", pricing: pricing(5, 25, 0.5, { cacheWrite5m: 6.25, cacheWrite1h: 10 }) },
+  { prefix: "claude-fable-5", pricing: pricing(10, 50, 1, { cacheWrite5m: 12.5, cacheWrite1h: 20 }) },
+  { prefix: "claude-mythos-5", pricing: pricing(10, 50, 1, { cacheWrite5m: 12.5, cacheWrite1h: 20 }) },
   { prefix: "claude-haiku", pricing: pricing(0.8, 4, 0.08, { cacheWrite5m: 1, cacheWrite1h: 1.6 }) },
   { prefix: "claude-3-5-haiku", pricing: pricing(0.8, 4, 0.08, { cacheWrite5m: 1, cacheWrite1h: 1.6 }) },
   { prefix: "claude-sonnet", pricing: pricing(3, 15, 0.3, { cacheWrite5m: 3.75, cacheWrite1h: 6 }) },
@@ -103,6 +105,27 @@ const PRICING_TABLE: PricingEntry[] = [
   { prefix: "o3", pricing: pricing(2, 8, 0.5) },
 ];
 
+/**
+ * A dated/versioned snapshot suffix in the shape every provider in this
+ * table actually uses: zero or more numeric version segments
+ * ("4-5-", "4-1-"), then a date as either "YYYYMMDD" or "YYYY-MM-DD".
+ * Deliberately narrower than "digits and hyphens" alone - a short numeric
+ * string like "50" must NOT count as a snapshot suffix, or a model like
+ * "claude-sonnet-50" would silently resolve to the unrelated "claude-sonnet"
+ * entry via bare substring overlap. Anything that isn't shaped like a real
+ * dated snapshot (a free-form variant name such as "-pro" or "-mini", or an
+ * unrelated model that merely shares a prefix, like "gpt-5.7" vs "gpt-5")
+ * stays unpriced rather than guessed.
+ */
+const DATED_SUFFIX_PATTERN = /^(?:\d+-)*(?:\d{8}|\d{4}-\d{2}-\d{2})$/;
+
+function matchesEntry(normalizedModel: string, entry: PricingEntry): boolean {
+  if (normalizedModel === entry.prefix) return true;
+  const hyphenatedPrefix = `${entry.prefix}-`;
+  if (!normalizedModel.startsWith(hyphenatedPrefix)) return false;
+  return DATED_SUFFIX_PATTERN.test(normalizedModel.slice(hyphenatedPrefix.length));
+}
+
 function isEffective(entry: PricingEntry, timestamp: string): boolean {
   return (!entry.effectiveFrom || timestamp >= entry.effectiveFrom)
     && (!entry.effectiveUntil || timestamp < entry.effectiveUntil);
@@ -110,7 +133,7 @@ function isEffective(entry: PricingEntry, timestamp: string): boolean {
 
 function findPricing(model: string, timestamp = DEFAULT_PRICING_TIMESTAMP): ModelPricing | null {
   const normalized = model.trim().toLocaleLowerCase("en-US");
-  const candidates = PRICING_TABLE.filter((entry) => normalized.startsWith(entry.prefix) && isEffective(entry, timestamp));
+  const candidates = PRICING_TABLE.filter((entry) => matchesEntry(normalized, entry) && isEffective(entry, timestamp));
   candidates.sort((left, right) => right.prefix.length - left.prefix.length || (right.effectiveFrom ?? "").localeCompare(left.effectiveFrom ?? ""));
   return candidates[0]?.pricing ?? null;
 }

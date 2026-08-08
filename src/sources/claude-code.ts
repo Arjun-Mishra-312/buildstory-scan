@@ -26,7 +26,6 @@ import type {
 
 const MAX_PROJECT_DIRECTORIES = 2_000;
 const MAX_SESSION_FILES = 5_000;
-const MAX_SESSION_FILE_BYTES = 128 * 1024 * 1024;
 const MAX_SUBAGENT_FILES_PER_SESSION = 200;
 const MAX_DISCOVERY_LINES = 50;
 
@@ -206,10 +205,22 @@ function addModelTokenUsage(
 ): void {
   const existing = modelCounts.get(model);
   const costNanoUsd = usage ? estimateUsageCostNanoUsd(model, usage, timestamp) : null;
+  // A model's tokens may price successfully on one record and fail on
+  // another (e.g. a dated pricing entry's effective window ends
+  // mid-session) - track which bucket each record's usage belongs to so
+  // the aggregate cost/coverage figures stay honest about the split.
+  const pricedThisRecord = usage !== null && costNanoUsd !== null;
+  const unpricedThisRecord = usage !== null && costNanoUsd === null;
   modelCounts.set(model, {
     provider,
     turns: (existing?.turns ?? 0) + 1,
     tokenUsage: addTokenUsage(existing?.tokenUsage ?? null, usage),
+    pricedTokenUsage: pricedThisRecord
+      ? addTokenUsage(existing?.pricedTokenUsage ?? null, usage)
+      : existing?.pricedTokenUsage ?? null,
+    unpricedTokenUsage: unpricedThisRecord
+      ? addTokenUsage(existing?.unpricedTokenUsage ?? null, usage)
+      : existing?.unpricedTokenUsage ?? null,
     costNanoUsd: costNanoUsd === null ? existing?.costNanoUsd ?? null : (existing?.costNanoUsd ?? 0) + costNanoUsd,
   });
 }
@@ -348,10 +359,6 @@ async function parseClaudeCodeFile(
     return { matched: false, skipped: true, warnings };
   }
   if (!stat.isFile() || stat.isSymbolicLink()) return { matched: false, skipped: true, warnings };
-  if (stat.size > MAX_SESSION_FILE_BYTES) {
-    warnings.push(warning("SESSION_FILE_TOO_LARGE", "warning", "A Claude Code session exceeded the 128 MiB safety limit and was skipped."));
-    return { matched: false, skipped: true, warnings };
-  }
 
   let scope: SessionSummary["workingDirectoryRelation"] | null | undefined;
   let rawSessionId: string | null = null;

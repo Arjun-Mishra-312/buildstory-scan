@@ -84,6 +84,17 @@ test("uses the dated Sonnet 5 introductory rate through August 31, 2026", () => 
   assert.equal(standard, 18_000_000);
 });
 
+test("prices Claude Fable 5 and Claude Mythos 5 at their published $10/$50 per-million-token rate", () => {
+  // claude-fable-5 / claude-mythos-5: $10/M input, $50/M output.
+  const fableCost = estimateSessionCostMicroUsd("claude-fable-5", usage({ inputTokens: 1_000_000, outputTokens: 1_000_000 }));
+  assert.equal(fableCost, 10_000_000 + 50_000_000);
+  assert.equal(isPricedModel("claude-fable-5"), true);
+
+  const mythosCost = estimateSessionCostMicroUsd("claude-mythos-5", usage({ inputTokens: 1_000_000, outputTokens: 1_000_000 }));
+  assert.equal(mythosCost, 10_000_000 + 50_000_000);
+  assert.equal(isPricedModel("claude-mythos-5"), true);
+});
+
 test("leaves GLM-5.2 explicitly unpriced", () => {
   assert.equal(estimateSessionCostMicroUsd("glm-5.2", usage({ inputTokens: 1_000 }), "2026-08-06T00:00:00Z"), null);
   assert.equal(isPricedModel("glm-5.2"), false);
@@ -98,4 +109,22 @@ test("picks the longest matching prefix, not just any match", () => {
   // Both "claude-sonnet" and "claude-3-5-sonnet" are registered; a 3.5 Sonnet
   // model id must resolve to its own (identical, here) rate via the longer prefix.
   assert.equal(isPricedModel("claude-3-5-sonnet-20241022"), true);
+});
+
+test("never guesses a price from an unrelated model that merely shares a prefix as a raw substring", () => {
+  // Each of these shares a literal string prefix with a registered entry
+  // ("gpt-5", "o3", "claude-sonnet-5") but names a distinct, unregistered
+  // model - a bare startsWith() would mis-price all four at the shorter
+  // entry's rate instead of leaving them honestly unpriced.
+  for (const model of ["gpt-5.5", "gpt-5.7", "o3-pro", "claude-sonnet-50"]) {
+    assert.equal(isPricedModel(model), false, `${model} must not resolve to a priced entry`);
+    assert.equal(estimateSessionCostMicroUsd(model, usage({ inputTokens: 1_000_000 })), null, `${model} must not be guessed a price`);
+  }
+});
+
+test("still matches a genuinely dated OpenAI snapshot suffix", () => {
+  // Unlike a free-form variant name ("-pro", "-mini"), a numeric/dated
+  // suffix on an OpenAI model id is the same priced model.
+  assert.equal(isPricedModel("gpt-5-codex-2026-08-06"), true);
+  assert.equal(isPricedModel("o3-20250416"), true);
 });

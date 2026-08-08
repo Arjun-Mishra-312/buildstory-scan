@@ -98,7 +98,8 @@ Scanner options:
   --cursor-home <directory>  Override the Cursor workspaceStorage root.
   --antigravity-home <directory>
                              Override Google Antigravity's local data directory.
-  --since <ISO-8601>         Inclusive activity-window start.
+  --since <ISO-8601>         Inclusive activity-window start. Defaults to the
+                             earliest observed session (full history).
   --until <ISO-8601>         Inclusive activity-window end.
   --consent local-scan       Allow local repository/session metadata reads.
   --upload-consent local-dashboard

@@ -1,8 +1,8 @@
 /** Portable TypeScript mirror of schema/project-snapshot.schema.json. */
 
-export const PROJECT_SNAPSHOT_SCHEMA_VERSION = "1.6.0" as const;
+export const PROJECT_SNAPSHOT_SCHEMA_VERSION = "1.7.0" as const;
 export const SCANNER_NAME = "buildstory" as const;
-export const SCANNER_VERSION = "0.7.1" as const;
+export const SCANNER_VERSION = "0.8.0" as const;
 export const CONSENT_STATEMENT_VERSION = "1.0" as const;
 /** Separate, additional consent for the opt-in narrativeEvidence bundle only. */
 export const NARRATIVE_EVIDENCE_CONSENT_VERSION = "1.0" as const;
@@ -154,7 +154,13 @@ export interface TimeWindow {
   start: IsoDateTime;
   end: IsoDateTime;
   timezone: "UTC";
-  startBasis: "explicit" | "default-lookback" | "empty-repository";
+  /**
+   * "full-history" is the current default (no --since: start at the
+   * earliest observed session). "default-lookback" and "empty-repository"
+   * are retained only so snapshots emitted by older scanner versions keep
+   * validating - the scanner no longer produces them.
+   */
+  startBasis: "explicit" | "full-history" | "default-lookback" | "empty-repository";
   endBasis: "explicit" | "latest-session" | "head-commit" | "unix-epoch";
   /** Optional coarse local-time offset used only to make work-pattern hours meaningful. */
   utcOffsetMinutes?: number;
@@ -298,6 +304,8 @@ export interface UsageSummary {
   tokenUsage: TokenUsage | null;
   /** Aggregate cost roll-up across every priced model; see session-pricing.ts. */
   cost: UsageCostSummary;
+  /** Absent on a snapshot from a scanner older than 1.7.0 - coverage is unknown, not zero. */
+  coverage?: UsageCoverage;
 }
 
 export interface UsageCostSummary {
@@ -308,6 +316,35 @@ export interface UsageCostSummary {
   /** Total tokens belonging to a model absent from the pricing table. */
   unpricedTokens: number;
   pricingTableVersion: string;
+}
+
+/**
+ * How completely this snapshot's usage/cost figures reflect what the
+ * scanner actually observed on disk. Exists so a build receipt never
+ * silently presents a partial number as if it were the whole story - see
+ * scanner.ts's time-window filtering and session_pricing.ts's per-record
+ * pricing.
+ */
+export interface UsageCoverage {
+  /** Sessions matched and parsed by any provider adapter, before time-window filtering. */
+  sessionsDiscovered: number;
+  /** Sessions actually included in this snapshot's usage/cost/session totals, after time-window filtering. */
+  sessionsIncluded: number;
+  /** sessionsDiscovered - sessionsIncluded. */
+  sessionsSkipped: number;
+  /**
+   * Why a discovered session didn't make it into this snapshot. Only
+   * "outside-window" is populated today - the scanner does not yet
+   * attribute an adapter-internal drop (an unusable timestamp, a
+   * sessionRef collision, an unreadable file) to a specific session count,
+   * though each remains visible as its own quality warning.
+   */
+  skipped: Array<{
+    reason: "outside-window" | "no-timestamp" | "duplicate-session-id" | "parse-failed" | "file-unreadable";
+    count: number;
+  }>;
+  /** Models with some tokens priced and some not (e.g. straddling a dated pricing entry's effective window) - see session-pricing.ts. */
+  partiallyPricedModels: number;
 }
 
 export interface GitAggregateMetrics {

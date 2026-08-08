@@ -344,6 +344,83 @@ test("a Codex session keeps per-response model usage across switches and resets"
   }
 });
 
+test("a single omitted field in a cumulative token_count does not re-add the whole running total", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "story-scanner-codex-partial-reset-"));
+  try {
+    const repository = path.join(root, "repo");
+    const codexHome = path.join(root, "codex-home");
+    const sessionDirectory = path.join(codexHome, "sessions", "2026", "08", "04");
+    await Promise.all([mkdir(repository, { recursive: true }), mkdir(sessionDirectory, { recursive: true })]);
+    await git(repository, ["init", "--quiet"]);
+    await git(repository, ["config", "user.name", "Fixture Builder"]);
+    await git(repository, ["config", "user.email", "fixture@example.invalid"]);
+    await writeFile(path.join(repository, "fixture.txt"), "synthetic fixture\n", "utf8");
+    await git(repository, ["add", "fixture.txt"]);
+    await git(repository, ["commit", "--quiet", "-m", "fixture commit"], {
+      GIT_AUTHOR_DATE: "2026-08-04T09:00:00Z",
+      GIT_COMMITTER_DATE: "2026-08-04T09:00:00Z",
+    });
+
+    const records = [
+      {
+        timestamp: "2026-08-04T10:00:00Z",
+        type: "session_meta",
+        payload: { id: "partial-reset-session", timestamp: "2026-08-04T10:00:00Z", cwd: repository, model_provider: "openai" },
+      },
+      { timestamp: "2026-08-04T10:00:01Z", type: "turn_context", payload: { cwd: repository, model: "gpt-5-mini" } },
+      {
+        timestamp: "2026-08-04T10:00:02Z",
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: {
+            total_token_usage: { input_tokens: 100, cached_input_tokens: 0, output_tokens: 50, reasoning_output_tokens: 20, total_tokens: 170 },
+          },
+        },
+      },
+      {
+        // Every field keeps climbing except reasoning_output_tokens, which
+        // this record omits entirely (parses as 0). A naive "any field
+        // decreased" reset would misread the whole cumulative snapshot as
+        // restarted and re-add all 210 tokens on top of the 170 already
+        // counted, instead of the true 40-token delta.
+        timestamp: "2026-08-04T10:00:03Z",
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: {
+            total_token_usage: { input_tokens: 150, cached_input_tokens: 0, output_tokens: 60, total_tokens: 210 },
+          },
+        },
+      },
+      { timestamp: "2026-08-04T10:00:04Z", type: "event_msg", payload: { type: "task_complete" } },
+    ];
+    await writeFile(
+      path.join(sessionDirectory, "partial-reset.jsonl"),
+      `${records.map((record) => JSON.stringify(record)).join("\n")}\n`,
+      "utf8",
+    );
+
+    const snapshot = await buildProjectSnapshot({
+      repositoryPath: repository,
+      consent: "local-scan",
+      providers: ["codex"],
+      codexHome,
+      since: "2026-08-04T00:00:00Z",
+      until: "2026-08-05T00:00:00Z",
+    });
+    validateProjectSnapshot(snapshot);
+
+    const model = snapshot.usage.models.find((entry) => entry.name === "gpt-5-mini");
+    assert.ok(model);
+    assert.equal(model.tokenUsage?.totalTokens, 210, "must be the true cumulative total (170 then a 40-token delta), not 380 from a false reset re-adding the second record whole");
+    assert.equal(model.tokenUsage?.inputTokens, 150);
+    assert.equal(model.tokenUsage?.outputTokens, 60);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("a Codex Voice session contributes only the segment after cwd changes into the repository", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "story-scanner-codex-cwd-transition-"));
   try {

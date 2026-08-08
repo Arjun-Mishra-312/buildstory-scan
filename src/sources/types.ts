@@ -5,11 +5,21 @@ import type { Redactor } from "../redaction.js";
  * Per-model response ledger accumulated in-process. `turns` is retained as
  * the transport-compatible name for the normalized model-response count.
  * `costNanoUsd` is intentionally internal and is never serialized.
+ *
+ * `tokenUsage` is every token this model was observed to use. Because
+ * pricing is evaluated per response record (a dated pricing entry's
+ * effective window can span mid-session), some of those tokens may price
+ * successfully while others don't - `pricedTokenUsage` and
+ * `unpricedTokenUsage` track that split so the aggregate cost/coverage
+ * figures never silently claim a token was priced when it wasn't, or drop
+ * cost for a model that partially priced.
  */
 export type ModelCounts = Map<string, {
   provider: string;
   turns: number;
   tokenUsage: TokenUsage | null;
+  pricedTokenUsage: TokenUsage | null;
+  unpricedTokenUsage: TokenUsage | null;
   costNanoUsd: number | null;
 }>;
 

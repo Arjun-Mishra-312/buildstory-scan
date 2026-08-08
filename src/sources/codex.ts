@@ -25,7 +25,6 @@ import type {
 } from "./types.js";
 
 const MAX_SESSION_FILES = 5_000;
-const MAX_SESSION_FILE_BYTES = 128 * 1024 * 1024;
 const DEFAULT_TOKEN_TIMESTAMP = "2026-08-06T00:00:00.000Z";
 const MAX_DISCOVERY_DEPTH = 6;
 
@@ -126,32 +125,24 @@ function addTokenUsage(total: TokenUsage | null, addition: TokenUsage | null): T
   };
 }
 
+/**
+ * Each field is its own independent counter, so a reset (the underlying
+ * cumulative counter going backward - e.g. a context clear) is detected and
+ * subtracted per field, not once for the whole usage object. A single
+ * record that simply omits one field (reasoning_output_tokens is common)
+ * must not be read as "everything reset" and double-count every other
+ * field that never actually went backward.
+ */
 function subtractTokenUsage(current: TokenUsage, previous: TokenUsage): TokenUsage {
-  const currentFields = [
-    current.inputTokens,
-    current.cachedInputTokens,
-    current.cacheCreationInputTokens ?? 0,
-    current.outputTokens,
-    current.reasoningOutputTokens,
-    current.totalTokens,
-  ];
-  const previousFields = [
-    previous.inputTokens,
-    previous.cachedInputTokens,
-    previous.cacheCreationInputTokens ?? 0,
-    previous.outputTokens,
-    previous.reasoningOutputTokens,
-    previous.totalTokens,
-  ];
-  const reset = currentFields.some((value, index) => value < previousFields[index]!);
-  const delta = (value: number, index: number): number => reset ? value : Math.max(0, value - previousFields[index]!);
-  const cacheCreationInputTokens = delta(currentFields[2]!, 2);
+  const delta = (currentValue: number, previousValue: number): number =>
+    currentValue < previousValue ? currentValue : Math.max(0, currentValue - previousValue);
+  const cacheCreationInputTokens = delta(current.cacheCreationInputTokens ?? 0, previous.cacheCreationInputTokens ?? 0);
   return {
-    inputTokens: delta(currentFields[0]!, 0),
-    cachedInputTokens: delta(currentFields[1]!, 1),
-    outputTokens: delta(currentFields[3]!, 3),
-    reasoningOutputTokens: delta(currentFields[4]!, 4),
-    totalTokens: delta(currentFields[5]!, 5),
+    inputTokens: delta(current.inputTokens, previous.inputTokens),
+    cachedInputTokens: delta(current.cachedInputTokens, previous.cachedInputTokens),
+    outputTokens: delta(current.outputTokens, previous.outputTokens),
+    reasoningOutputTokens: delta(current.reasoningOutputTokens, previous.reasoningOutputTokens),
+    totalTokens: delta(current.totalTokens, previous.totalTokens),
     ...(cacheCreationInputTokens > 0 || current.cacheCreationInputTokens !== undefined
       ? { cacheCreationInputTokens }
       : {}),
@@ -179,10 +170,6 @@ async function parseCodexFile(
     return { matched: false, skipped: true, warnings };
   }
   if (!stat.isFile() || stat.isSymbolicLink()) return { matched: false, skipped: true, warnings };
-  if (stat.size > MAX_SESSION_FILE_BYTES) {
-    warnings.push(warning("SESSION_FILE_TOO_LARGE", "warning", "A Codex session exceeded the 128 MiB safety limit and was skipped."));
-    return { matched: false, skipped: true, warnings };
-  }
 
   let currentScope: SessionSummary["workingDirectoryRelation"] | null | undefined;
   let matchedScope: SessionSummary["workingDirectoryRelation"] | null = null;
@@ -205,6 +192,7 @@ async function parseCodexFile(
   let sessionTokenUsage: TokenUsage | null = null;
   let activeModel: string | null = null;
   let sessionModel: string | null = null;
+  let warnedUnknownModel = false;
   let previousCumulativeUsage: TokenUsage | null = null;
   let previousUsageFingerprint: string | null = null;
   const toolCounts = new Map<string, number>();
@@ -235,6 +223,15 @@ async function parseCodexFile(
       metadataTimestamp = isoTimestamp(payload.timestamp);
       const cwd = asString(payload.cwd);
       if (cwd) currentScope = relationToRepository(context.repositoryRoot, cwd);
+      // Deliberately NOT resetting activeModel here. A rollout file
+      // regularly carries more than one session_meta record, but in
+      // practice a repeat session_meta rarely carries its own `model`, and
+      // real transcripts have runs of token_count records between a
+      // session_meta and the next turn_context that genuinely belong to
+      // the still-active model - resetting to null here was tried and
+      // measured against real transcripts: it misattributed the majority
+      // of turns to the "unknown-model" placeholder. activeModel stays
+      // sticky until a turn_context explicitly names a new one.
     } else if (recordType === "turn_context") {
       const cwd = asString(payload.cwd);
       if (cwd) currentScope = relationToRepository(context.repositoryRoot, cwd);
@@ -270,6 +267,8 @@ async function parseCodexFile(
             provider,
             turns: existing?.turns ?? 0,
             tokenUsage: existing?.tokenUsage ?? null,
+            pricedTokenUsage: existing?.pricedTokenUsage ?? null,
+            unpricedTokenUsage: existing?.unpricedTokenUsage ?? null,
             costNanoUsd: existing?.costNanoUsd ?? null,
           });
         }
@@ -310,13 +309,25 @@ async function parseCodexFile(
         if (!inRepository || !acceptedUsage || acceptedUsage.totalTokens <= 0) return true;
 
         const model = activeModel ?? sessionModel ?? "unknown-model";
+        if (model === "unknown-model") warnedUnknownModel = true;
         const provider = context.redactor.cleanMetadata(providerName, 80);
         const existing = modelCounts.get(model);
         const costNanoUsd = estimateUsageCostNanoUsd(model, acceptedUsage, timestamp ?? DEFAULT_TOKEN_TIMESTAMP);
+        // A model's tokens may price successfully on one record and fail on
+        // another (e.g. a dated pricing entry's effective window ends
+        // mid-session) - track which bucket this record's usage belongs to
+        // so the aggregate cost/coverage figures stay honest about the split.
+        const pricedThisRecord = costNanoUsd !== null;
         modelCounts.set(model, {
           provider,
           turns: (existing?.turns ?? 0) + 1,
           tokenUsage: addTokenUsage(existing?.tokenUsage ?? null, acceptedUsage),
+          pricedTokenUsage: pricedThisRecord
+            ? addTokenUsage(existing?.pricedTokenUsage ?? null, acceptedUsage)
+            : existing?.pricedTokenUsage ?? null,
+          unpricedTokenUsage: pricedThisRecord
+            ? existing?.unpricedTokenUsage ?? null
+            : addTokenUsage(existing?.unpricedTokenUsage ?? null, acceptedUsage),
           costNanoUsd: costNanoUsd === null
             ? existing?.costNanoUsd ?? null
             : (existing?.costNanoUsd ?? 0) + costNanoUsd,
@@ -403,11 +414,15 @@ async function parseCodexFile(
 
   if (modelCounts.size === 0) {
     warnings.push(warning("SESSION_MODEL_UNKNOWN", "info", "No model identifier was present in the session metadata.", sessionRef));
+  } else if (warnedUnknownModel) {
+    warnings.push(warning("SESSION_MODEL_UNKNOWN", "info", "At least one token count was recorded before any model identifier was established and was billed under a placeholder model name.", sessionRef));
   }
   if (sessionTokenUsage === null && modelCounts.size > 0) {
     // A session can expose model contexts without any completed response.
     // Keep those model references for attribution, but do not fabricate calls.
-    for (const [model, value] of modelCounts) modelCounts.set(model, { ...value, turns: 0, tokenUsage: null, costNanoUsd: null });
+    for (const [model, value] of modelCounts) {
+      modelCounts.set(model, { ...value, turns: 0, tokenUsage: null, pricedTokenUsage: null, unpricedTokenUsage: null, costNanoUsd: null });
+    }
   }
   const status: SessionStatus = aborted ? "aborted" : completed ? "completed" : "incomplete";
   if (status === "incomplete" && located.kind === "active") {
