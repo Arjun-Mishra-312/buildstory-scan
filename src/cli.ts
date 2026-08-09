@@ -107,12 +107,13 @@ Scanner options:
   --dry-run                  Validate and print the redacted snapshot; write no file.
   --output <file>            Atomically write outside the selected repository.
   --overwrite                Replace an existing regular output file.
-  --with-evidence            In cloud mode, opt in to a small, redacted set of
-                             conversation excerpts (narrativeEvidence). Off by
-                             default. Requires --review.
-  --review                   In cloud mode, print exact excerpts; in local or
-                             bring-your-own-key mode, preview generated prose.
-                             Require confirmation.
+  --with-evidence            In Buildstory Cloud mode, opt in to a small,
+                             redacted set of conversation excerpts
+                             (narrativeEvidence). Off by default. Requires
+                             --review.
+  --review                   In Buildstory Cloud mode, print exact excerpts;
+                             in local or bring-your-own-key mode, preview
+                             generated prose. Require confirmation.
   --require-evidence         Strict mode: exit before upload/write if the
                              evidence bundle would be empty. Requires
                              --with-evidence. Without this flag, an empty
@@ -134,10 +135,11 @@ generatedNarrative is uploaded but narrativeEvidence is never uploaded.
 Bring-your-own-key mode calls a cloud model you configure yourself
 (BUILDSTORY_BYOK_API_KEY, BUILDSTORY_BYOK_BASE_URL, BUILDSTORY_BYOK_MODEL) -
 redacted excerpts go only to that provider, never to Buildstory; only the
-resulting generatedNarrative is uploaded, exactly like local mode. Cloud
-mode is explicit and, with --review confirmation, includes a bounded set of
-redacted excerpts sent through Buildstory. Off mode uploads deterministic
-metrics/profile facts only.
+resulting generatedNarrative is uploaded, exactly like local mode.
+Buildstory Cloud mode is explicit and, with --review confirmation, includes
+a bounded set of redacted excerpts sent through Buildstory to Buildstory's
+own narrative provider - there is no model choice on this path. Off mode
+uploads deterministic metrics/profile facts only.
 `;
 
 interface ParsedScannerArguments {
@@ -597,7 +599,7 @@ function printEvidenceForReview(snapshot: ReviewableSnapshot): void {
     return;
   }
   process.stdout.write(
-    `The following ${bundle.excerpts.length} redacted excerpt${bundle.excerpts.length === 1 ? "" : "s"} would be sent to the configured cloud model if you continue:\n\n`,
+    `The following ${bundle.excerpts.length} redacted excerpt${bundle.excerpts.length === 1 ? "" : "s"} would be sent to Buildstory Cloud if you continue:\n\n`,
   );
   for (const excerpt of bundle.excerpts) {
     const provider = sessionProvider.get(excerpt.sessionRef);
@@ -722,10 +724,10 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
     throw new ScannerError(
       "NARRATIVE_MODE_CONFLICT",
       activeNarrative.mode === "local"
-        ? "This connection is in local mode. Local generation never uploads excerpts; choose cloud mode in the dashboard before using --with-evidence."
+        ? "This connection is in local mode. Local generation never uploads excerpts; choose Buildstory Cloud mode in the dashboard before using --with-evidence."
         : activeNarrative.mode === "byok"
-          ? "This connection is in bring-your-own-key mode. BYOK generation sends excerpts only to your configured provider and never uploads them to Buildstory; choose cloud mode in the dashboard before using --with-evidence."
-          : "This connection is in off mode. Off mode never uploads excerpts; choose cloud mode in the dashboard before using --with-evidence.",
+          ? "This connection is in bring-your-own-key mode. BYOK generation sends excerpts only to your configured provider and never uploads them to Buildstory; choose Buildstory Cloud mode in the dashboard before using --with-evidence."
+          : "This connection is in off mode. Off mode never uploads excerpts; choose Buildstory Cloud mode in the dashboard before using --with-evidence.",
       2,
     );
   }
@@ -733,10 +735,10 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
     throw new ScannerError(
       "REQUIRE_EVIDENCE_WITH_LOCAL",
       activeNarrative.mode === "local"
-        ? "--require-evidence applies only to cloud excerpt mode; local mode generates prose on this machine."
+        ? "--require-evidence applies only to Buildstory Cloud mode; local mode generates prose on this machine."
         : activeNarrative.mode === "byok"
-          ? "--require-evidence applies only to cloud excerpt mode; bring-your-own-key mode generates prose via your configured provider."
-          : "--require-evidence applies only to cloud excerpt mode; off mode uploads deterministic metrics only.",
+          ? "--require-evidence applies only to Buildstory Cloud mode; bring-your-own-key mode generates prose via your configured provider."
+          : "--require-evidence applies only to Buildstory Cloud mode; off mode uploads deterministic metrics only.",
       2,
     );
   }
@@ -754,7 +756,7 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
       const canPrompt = Boolean(process.stdin.isTTY) && !parsed.quiet;
       if (canPrompt) {
         process.stdout.write(`Narrative generation failed: ${error.message}\n`);
-        const switchToCloud = await confirmProceed("Switch to cloud mode? This will select and upload redacted excerpts");
+        const switchToCloud = await confirmProceed("Switch to Buildstory Cloud mode? This will select and upload redacted excerpts");
         progress = createProgressReporter(parsed.quiet);
         if (switchToCloud) {
           activeNarrative = { mode: "cloud", model: null };

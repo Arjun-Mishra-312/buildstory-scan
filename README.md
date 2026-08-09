@@ -159,7 +159,7 @@ The connected dashboard chooses one of four narrative modes; the CLI reads it fr
 
 - **Local** (the default): calls Ollama on loopback. Set `BUILDSTORY_OLLAMA_BASE_URL` to override the default `http://127.0.0.1:11434`.
 - **Bring your own key (BYOK)**: calls an OpenAI-compatible cloud model you configure yourself, using `BUILDSTORY_BYOK_API_KEY` (required), `BUILDSTORY_BYOK_BASE_URL` (defaults to `https://api.openai.com/v1`), and optionally `BUILDSTORY_BYOK_MODEL`. Read only from the environment, never a CLI flag - a flag would land in shell history and process listings. Excerpts go from this machine directly to that provider, under that provider's own terms; Buildstory never sees them or the key. The resulting `generatedNarrative` reports `provider: "byok"` rather than the provider's hostname, since the uploaded snapshot's own fail-closed check rejects any field that looks like a URL or host.
-- **Cloud**: requires `--with-evidence --review`; excerpts are uploaded to the connected Buildstory dashboard after you review and confirm them.
+- **Buildstory Cloud**: requires `--with-evidence --review`; excerpts are uploaded to the connected Buildstory dashboard after you review and confirm them. Calls Buildstory's own narrative provider - there is no model choice on this path.
 - **Off**: no narrative generation; only deterministic metrics and profile scores.
 
 Local and BYOK both upload only `generatedNarrative` (never `narrativeEvidence`) and share the identical redaction/sanitization pipeline - only the HTTP destination for the model call differs.
