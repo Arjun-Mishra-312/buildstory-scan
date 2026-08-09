@@ -50,7 +50,10 @@ async function runInstalledBuildStory(binDirectory: string, args: string[]): Pro
   return runCommand(CLI_COMMAND, args, environment);
 }
 
-test("locally packed install exposes the advertised buildstory-scan command", { timeout: 30_000 }, async (t) => {
+// A cold Windows npm install can spend 30-90 seconds starting npm and
+// extracting the packed archive. Keep this smoke test strict, but allow the
+// first-run packaging path enough time to complete in CI and on new machines.
+test("locally packed install exposes the advertised buildstory-scan command", { timeout: 120_000 }, async (t) => {
   // Set only when the runner is invoked through npm. `node --test dist/test/*.js`
   // straight from a shell is a legitimate way to run this suite, so skip rather
   // than fail - the packed-install path genuinely cannot be exercised without npm.
