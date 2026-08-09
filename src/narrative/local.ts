@@ -341,14 +341,21 @@ async function callOllamaWithRepair(url: URL, model: string, prompt: string, tim
     const value = await callOllama(url, model, currentPrompt, timeoutMs, contextTokens, component);
     const invalid = unknownSourceRefs(value, allowedRefs);
     const validation = validateStoryPackComponent(value, component, allowedRefs);
-    if ((!invalid.length && validation.ok) || attempt === 1) return value;
+    if (!invalid.length && validation.ok) return value;
+    // On the last attempt, fail closed instead of returning the still-invalid
+    // value as if it had passed. The caller (runNarrativeGeneration) already
+    // catches this and degrades to the metric-derived fallback for this
+    // component - the same path already used for every other provider
+    // failure - so this is not a new failure mode, just closing a hole that
+    // let an invalid response through unvalidated.
+    if (attempt === 1) throw new LocalNarrativeGenerationError("local_provider_invalid_response", "The configured local model returned invalid narrative output after repair.");
     const feedback = [
       invalid.length ? `unknown sourceRefs: ${invalid.join(", ")}` : "",
       validation.errors.length ? `schema issues: ${validation.errors.slice(0, 8).join("; ")}` : "",
     ].filter(Boolean).join(". ");
     currentPrompt = `${prompt}\nValidation feedback: ${feedback}. Retry with one JSON object matching the requested component schema and only the provided source references.`;
   }
-  return {};
+  throw new LocalNarrativeGenerationError("local_provider_invalid_response", "The configured local model returned invalid narrative output after repair.");
 }
 
 async function callByokWithRepair(baseUrl: string, apiKey: string, model: string, prompt: string, timeoutMs: number, allowedRefs: Set<string>, component: StoryPackComponent, provider: "openrouter" | "openai", analysisTier: AnalysisTier): Promise<unknown> {
@@ -357,14 +364,36 @@ async function callByokWithRepair(baseUrl: string, apiKey: string, model: string
     const value = await callByok(baseUrl, apiKey, model, currentPrompt, timeoutMs, component, provider, analysisTier);
     const invalid = unknownSourceRefs(value, allowedRefs);
     const validation = validateStoryPackComponent(value, component, allowedRefs);
-    if ((!invalid.length && validation.ok) || attempt === 1) return value;
+    if (!invalid.length && validation.ok) return value;
+    // See callOllamaWithRepair: fail closed rather than returning an
+    // unvalidated value, and let the existing per-component fallback in
+    // runNarrativeGeneration handle it.
+    if (attempt === 1) throw new LocalNarrativeGenerationError("local_provider_invalid_response", "The configured model provider returned invalid narrative output after repair.");
     const feedback = [
       invalid.length ? `unknown sourceRefs: ${invalid.join(", ")}` : "",
       validation.errors.length ? `schema issues: ${validation.errors.slice(0, 8).join("; ")}` : "",
     ].filter(Boolean).join(". ");
     currentPrompt = `${prompt}\nValidation feedback: ${feedback}. Retry with one JSON object matching the requested component schema and only the provided source references.`;
   }
-  return {};
+  throw new LocalNarrativeGenerationError("local_provider_invalid_response", "The configured model provider returned invalid narrative output after repair.");
+}
+
+// The scanner package's validateStoryPackComponent only knows "story" and
+// "insights" (see story-pack.ts) - there is no deep-finding-level validator
+// here to match the web app's. This checks the DEEP_ANALYSIS_SCHEMA's own
+// required keys are present with the right container type (array vs
+// object), which is what the previous check (only "does deepAnalysis exist"
+// for deep-report, nothing at all for deep) was missing.
+function matchesRequiredShape(value: unknown, schema: { required: readonly string[]; properties: Record<string, { type?: string }> }): boolean {
+  const record = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+  if (!record) return false;
+  return schema.required.every((key) => {
+    const expectedType = schema.properties[key]?.type;
+    const actual = record[key];
+    if (expectedType === "array") return Array.isArray(actual);
+    if (expectedType === "object") return Boolean(actual) && typeof actual === "object" && !Array.isArray(actual);
+    return actual !== undefined && actual !== null;
+  });
 }
 
 async function callByokDeepWithRepair(baseUrl: string, apiKey: string, model: string, prompt: string, timeoutMs: number, allowedRefs: Set<string>, provider: "openrouter" | "openai", component: "deep" | "deep-report" = "deep"): Promise<unknown> {
@@ -373,7 +402,18 @@ async function callByokDeepWithRepair(baseUrl: string, apiKey: string, model: st
     const value = await callByok(baseUrl, apiKey, model, currentPrompt, timeoutMs, component, provider, "deep");
     const invalid = unknownSourceRefs(value, allowedRefs);
     const objectValue = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
-    if (!invalid.length && objectValue && (component === "deep" || (objectValue.deepAnalysis && typeof objectValue.deepAnalysis === "object"))) return value;
+    // Deep-report additionally runs the real field-level validator (title
+    // lengths, sourceRefs provenance, cardinality) against its story and
+    // insights portions - previously nothing beyond "deepAnalysis exists as
+    // an object" was ever checked here.
+    const shapeOk = component === "deep"
+      ? matchesRequiredShape(value, DEEP_ANALYSIS_SCHEMA)
+      : objectValue !== null
+        && matchesRequiredShape(objectValue.deepAnalysis, DEEP_ANALYSIS_SCHEMA)
+        && validateStoryPackComponent(objectValue, "story", allowedRefs).ok
+        && validateStoryPackComponent(objectValue, "insights", allowedRefs).ok;
+    if (!invalid.length && shapeOk) return value;
+    if (attempt === 1) throw new LocalNarrativeGenerationError("local_provider_invalid_response", "The configured provider returned invalid deep analysis after repair.");
     currentPrompt = `${prompt}\nValidation feedback: use only these source references: ${[...allowedRefs].join(", ")}. Return one JSON object and no prose.`;
   }
   throw new LocalNarrativeGenerationError("local_provider_invalid_response", "The configured provider returned invalid deep analysis after repair.");
