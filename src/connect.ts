@@ -1,5 +1,5 @@
 import { storeUploadGrant, type StoredUploadGrant } from "./connection-state.js";
-import { PROJECT_SNAPSHOT_SCHEMA_VERSION, SCANNER_VERSION, type NarrativeMode } from "./contract.js";
+import { PROJECT_SNAPSHOT_SCHEMA_VERSION, SCANNER_VERSION, type AnalysisTier, type NarrativeMode, type NarrativeProvider } from "./contract.js";
 import { ScannerError } from "./errors.js";
 import { isLoopbackHostname, normalizeApiBase, resolveTrustedApiUrl } from "./loopback-url.js";
 
@@ -50,7 +50,7 @@ interface ConnectionRequest {
   capabilities: {
     projectSnapshotSchemaVersions: [typeof PROJECT_SNAPSHOT_SCHEMA_VERSION];
     snapshotUpload: false;
-    narrativeModes: ["local", "cloud", "off"];
+    narrativeModes: ["local", "byok", "cloud", "off"];
   };
 }
 
@@ -179,12 +179,24 @@ function validateConnectionResponse(
     );
   }
 
-  let narrative: StoredUploadGrant["narrative"] = { mode: "cloud", model: null };
+  // Legacy servers omitted this block. Preserve their former cloud behavior,
+  // but never silently opt an old connection into a higher-evidence tier.
+  let narrative: StoredUploadGrant["narrative"] = { mode: "cloud", provider: "openrouter", model: null, analysisTier: "standard" };
   if ("narrative" in value) {
-    if (!isRecord(value.narrative) || !hasExactKeys(value.narrative, ["mode", "model"]) || !["local", "cloud", "off"].includes(value.narrative.mode as string) || (value.narrative.model !== null && (typeof value.narrative.model !== "string" || value.narrative.model.length > 160))) {
+    if (!isRecord(value.narrative)
+      || !(hasExactKeys(value.narrative, ["mode", "model"]) || hasExactKeys(value.narrative, ["mode", "provider", "model", "analysisTier"]))
+      || !["local", "byok", "cloud", "off"].includes(value.narrative.mode as string)
+      || (value.narrative.model !== null && (typeof value.narrative.model !== "string" || value.narrative.model.length > 160))
+      || ("provider" in value.narrative && value.narrative.provider !== null && !["openrouter", "openai", "ollama", "openai-compatible"].includes(value.narrative.provider as string))
+      || ("analysisTier" in value.narrative && !["standard", "deep"].includes(value.narrative.analysisTier as string))) {
       throw new ScannerError("CONNECT_RESPONSE_INVALID", "The local API returned an invalid narrative mode selection.");
     }
-    narrative = { mode: value.narrative.mode as NarrativeMode, model: value.narrative.model as string | null };
+    narrative = {
+      mode: value.narrative.mode as NarrativeMode,
+      provider: ("provider" in value.narrative ? value.narrative.provider : null) as NarrativeProvider | null,
+      model: value.narrative.model as string | null,
+      analysisTier: ("analysisTier" in value.narrative ? value.narrative.analysisTier : "standard") as AnalysisTier,
+    };
   }
 
   return {
@@ -253,7 +265,7 @@ export async function connectBuildStory(options: ConnectOptions): Promise<Connec
     capabilities: {
       projectSnapshotSchemaVersions: [PROJECT_SNAPSHOT_SCHEMA_VERSION],
       snapshotUpload: false,
-      narrativeModes: ["local", "cloud", "off"],
+      narrativeModes: ["local", "byok", "cloud", "off"],
     },
   };
   const controller = new AbortController();

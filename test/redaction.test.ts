@@ -49,3 +49,17 @@ test("detects URLs, hosts, and local paths at the upload boundary", () => {
     [],
   );
 });
+
+test("drops quoted JSON secrets and redacts emails, uncommon hosts, and quoted paths with spaces", () => {
+  const redactor = new Redactor();
+  assert.equal(redactor.cleanExcerpt('{"api_key":"lowentropy-secret"}', 600), null);
+  const cleaned = redactor.cleanExcerpt(
+    'Email jane.builder@example.ca, open private.host.xyz and "C:\\Users\\Jane Doe\\private source.ts".',
+    600,
+  );
+  assert.ok(cleaned);
+  assert.doesNotMatch(cleaned!, /jane\.builder|example\.ca|private\.host\.xyz|Jane Doe|private source/);
+  assert.match(cleaned!, /\[email-address\]/);
+  assert.match(cleaned!, /\[raw-host\]/);
+  assert.match(cleaned!, /\[absolute-path\]/);
+});

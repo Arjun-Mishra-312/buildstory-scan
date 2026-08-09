@@ -1,4 +1,5 @@
 export type PrivateLocationCategory =
+  | "email-address"
   | "remote-url"
   | "raw-host"
   | "absolute-path"
@@ -8,14 +9,17 @@ const locationRules: Array<{
   category: PrivateLocationCategory;
   pattern: RegExp;
 }> = [
+  { category: "email-address", pattern: /\b(?!git@)[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,63}\b/i },
   { category: "remote-url", pattern: /\b[a-z][a-z0-9+.-]*:\/\/[^\s<>()]+/i },
   { category: "remote-url", pattern: /\bgit@[^\s:]+:[^\s]+/i },
+  { category: "absolute-path", pattern: /(?:^|[\s(=])(?:"(?:[A-Za-z]:[\\/]|\\\\|\/(?!\/))[^"\r\n]+"|'(?:[A-Za-z]:[\\/]|\\\\|\/(?!\/))[^'\r\n]+'|`(?:[A-Za-z]:[\\/]|\\\\|\/(?!\/))[^`\r\n]+`)/ },
+  { category: "relative-file-path", pattern: /(?:^|[\s(=])(?:"(?:\.\.?[\\/]|~[\\/])[^"\r\n]+"|'(?:\.\.?[\\/]|~[\\/])[^'\r\n]+'|`(?:\.\.?[\\/]|~[\\/])[^`\r\n]+`)/ },
   { category: "absolute-path", pattern: /(?:^|[\s("'`=])(?:[A-Za-z]:[\\/]|\\\\)[^\s<>()"'`]+/ },
   { category: "absolute-path", pattern: /(?:^|[\s("'`=])\/(?!\/)[^\s<>()"'`]+/ },
   { category: "relative-file-path", pattern: /(?:^|[\s("'`=])(?:\.\.?[\\/]|~[\\/])[^\s<>()"'`]+/ },
   { category: "relative-file-path", pattern: /(?:^|[\s("'`=])(?:[A-Za-z0-9_.-]+[\\/])+(?:[A-Za-z0-9_.-]+\.[A-Za-z][A-Za-z0-9]{0,11})(?=$|[\s)"'`,;])/ },
   { category: "raw-host", pattern: /\b(?:localhost|(?:\d{1,3}\.){3}\d{1,3}|\[[0-9a-f:]+\])(?::\d{1,5})?\b/i },
-  { category: "raw-host", pattern: /\b(?:[a-z0-9-]+\.)+(?:com|net|org|io|dev|app|co|ai|cloud|tech|local|internal|invalid|test|example)(?::\d{1,5})?\b/i },
+  { category: "raw-host", pattern: /\b(?:[a-z0-9-]+\.)+(?:com|net|org|io|dev|app|co|ai|cloud|tech|local|internal|invalid|test|example|ca|uk|xyz|me|info|biz|us|eu|de|fr|jp|au|in)(?::\d{1,5})?\b/i },
 ];
 
 /** Scans string values only; object keys are validated separately by the schema. */
@@ -54,7 +58,7 @@ export function replacePrivateLocations(text: string): { value: string; findings
     const global = new RegExp(rule.pattern.source, `${rule.pattern.flags.includes("g") ? rule.pattern.flags : `${rule.pattern.flags}g`}`);
     output = output.replace(global, (match) => {
       findings.add(rule.category);
-      const leadingWhitespace = /^[\s("'`=]/.exec(match)?.[0] ?? "";
+      const leadingWhitespace = /^[\s(=]/.exec(match)?.[0] ?? "";
       return `${leadingWhitespace}[${rule.category}]`;
     });
   }

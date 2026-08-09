@@ -471,7 +471,7 @@
       "additionalProperties": false,
       "required": ["version", "generatedAt", "mode", "provider", "model", "sections", "fallbacksUsed"],
       "properties": {
-        "version": { "enum": ["1.0.0", "2.0.0"] },
+        "version": { "enum": ["1.0.0", "2.0.0", "3.0.0"] },
         "generatedAt": { "$ref": "#/$defs/dateTime" },
         "mode": { "const": "local" },
         "provider": { "type": "string", "minLength": 1, "maxLength": 80 },
@@ -517,12 +517,36 @@
         }
       }
     },
+    "storyPackFinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title", "summary", "sourceRefs", "confidence"],
+      "properties": {
+        "title": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "summary": { "type": "string", "minLength": 1, "maxLength": 600 },
+        "sourceRefs": { "type": "array", "maxItems": 6, "items": { "type": "string", "pattern": "^(S[0-9]{2,}|GIT)$" } },
+        "confidence": { "enum": ["high", "medium", "low"] }
+      }
+    },
+    "storyPackRecommendation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["title", "summary", "sourceRefs", "confidence", "priority", "rationale"],
+      "properties": {
+        "title": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "summary": { "type": "string", "minLength": 1, "maxLength": 600 },
+        "sourceRefs": { "type": "array", "maxItems": 6, "items": { "type": "string", "pattern": "^(S[0-9]{2,}|GIT)$" } },
+        "confidence": { "enum": ["high", "medium", "low"] },
+        "priority": { "enum": ["now", "next", "later"] },
+        "rationale": { "type": "string", "minLength": 1, "maxLength": 600 }
+      }
+    },
     "storyPack": {
       "type": "object",
       "additionalProperties": false,
       "required": ["version", "sources", "hero", "buildArc", "moments", "turningPoint", "decisions", "learnings", "standoutTraits", "growthEdge"],
       "properties": {
-        "version": { "const": "2.0.0" },
+        "version": { "enum": ["2.0.0", "3.0.0"] },
+        "analysisTier": { "enum": ["standard", "deep"] },
         "sources": { "type": "array", "items": { "$ref": "#/$defs/storyPackSource" } },
         "hero": {
           "type": "object", "additionalProperties": false, "required": ["headline", "summary"],
@@ -541,7 +565,7 @@
           }
         },
         "moments": {
-          "type": "array", "minItems": 3, "maxItems": 5,
+          "type": "array", "minItems": 3, "maxItems": 12,
           "items": {
             "type": "object", "additionalProperties": false, "required": ["phase", "kind", "title", "whatHappened", "whyItMattered", "sourceRefs"],
             "properties": {
@@ -573,6 +597,32 @@
         "growthEdge": {
           "type": "object", "additionalProperties": false, "required": ["title", "observation", "nextStep", "sourceRefs"],
           "properties": { "title": { "type": "string", "minLength": 1, "maxLength": 120 }, "observation": { "type": "string", "minLength": 1, "maxLength": 400 }, "nextStep": { "type": "string", "minLength": 1, "maxLength": 300 }, "sourceRefs": { "type": "array", "items": { "type": "string", "pattern": "^(S[0-9]{2,}|GIT)$" } } }
+        },
+        "deepAnalysis": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["executiveSynthesis", "decisionReview", "frictionAndRecovery", "engineeringPatterns", "risksAndEvidenceGaps", "nextBuildActions", "chapterChanges", "coverage"],
+          "properties": {
+            "executiveSynthesis": { "$ref": "#/$defs/storyPackFinding" },
+            "decisionReview": { "type": "array", "maxItems": 8, "items": { "$ref": "#/$defs/storyPackFinding" } },
+            "frictionAndRecovery": { "type": "array", "maxItems": 6, "items": { "$ref": "#/$defs/storyPackFinding" } },
+            "engineeringPatterns": { "type": "array", "maxItems": 6, "items": { "$ref": "#/$defs/storyPackFinding" } },
+            "risksAndEvidenceGaps": { "type": "array", "maxItems": 5, "items": { "$ref": "#/$defs/storyPackFinding" } },
+            "nextBuildActions": { "type": "array", "maxItems": 6, "items": { "$ref": "#/$defs/storyPackRecommendation" } },
+            "chapterChanges": { "type": "array", "maxItems": 5, "items": { "$ref": "#/$defs/storyPackFinding" } },
+            "coverage": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["sessionsSeen", "excerptsUsed", "evidenceBytes", "windowStart", "windowEnd"],
+              "properties": {
+                "sessionsSeen": { "$ref": "#/$defs/nonNegativeInteger" },
+                "excerptsUsed": { "$ref": "#/$defs/nonNegativeInteger" },
+                "evidenceBytes": { "$ref": "#/$defs/nonNegativeInteger" },
+                "windowStart": { "$ref": "#/$defs/dateTime" },
+                "windowEnd": { "$ref": "#/$defs/dateTime" }
+              }
+            }
+          }
         }
       }
     },
@@ -585,7 +635,7 @@
         "sessionRef": { "type": "string", "pattern": "^ses_[a-f0-9]{20}$" },
         "occurredAt": { "$ref": "#/$defs/dateTime" },
         "role": { "enum": ["session-title", "user-intent", "plan-transition", "assistant-decision", "outcome"] },
-        "text": { "type": "string", "minLength": 1, "maxLength": 600 }
+        "text": { "type": "string", "minLength": 1, "maxLength": 1500 }
       }
     },
     "narrativeEvidence": {
@@ -603,7 +653,8 @@
             "maxExcerpts": { "$ref": "#/$defs/nonNegativeInteger" },
             "maxCharsPerExcerpt": { "$ref": "#/$defs/nonNegativeInteger" },
             "maxTotalChars": { "$ref": "#/$defs/nonNegativeInteger" },
-            "excerptSelection": { "const": "deterministic-heuristic-v1" }
+            "maxTotalBytes": { "$ref": "#/$defs/nonNegativeInteger" },
+            "excerptSelection": { "enum": ["deterministic-heuristic-v1", "deep-evidence-v2"] }
           }
         },
         "consent": {
@@ -624,7 +675,7 @@
         },
         "excerpts": {
           "type": "array",
-          "maxItems": 100,
+          "maxItems": 240,
           "items": { "$ref": "#/$defs/narrativeExcerpt" }
         },
         "discarded": {

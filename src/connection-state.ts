@@ -3,7 +3,7 @@ import { chmod, lstat, mkdir, open, readFile, rename, rm } from "node:fs/promise
 import os from "node:os";
 import path from "node:path";
 import { PROJECT_SNAPSHOT_SCHEMA_VERSION } from "./contract.js";
-import type { NarrativeMode } from "./contract.js";
+import type { AnalysisTier, NarrativeMode, NarrativeProvider } from "./contract.js";
 import { ScannerError } from "./errors.js";
 
 const STATE_FILE_NAME = "active-upload-state.json";
@@ -21,7 +21,7 @@ export interface StoredUploadGrant extends StateBase {
   snapshotEndpoint: string;
   maxBytes: number;
   /** Absent only for grants written by pre-mode CLIs; those intentionally default to cloud. */
-  narrative?: { mode: NarrativeMode; model: string | null };
+  narrative?: { mode: NarrativeMode; provider: NarrativeProvider | null; model: string | null; analysisTier: AnalysisTier };
 }
 
 export interface StoredStatusAccess extends StateBase {
@@ -73,7 +73,15 @@ function validateStoredState(value: unknown): StoredConnectionState {
     && value.snapshotEndpoint.length <= 2048
     && Number.isSafeInteger(value.maxBytes)
     && (value.maxBytes as number) >= 1
-    && (value.narrative === undefined || (isRecord(value.narrative) && hasExactKeys(value.narrative, ["mode", "model"]) && ["local", "cloud", "off"].includes(value.narrative.mode as string) && (value.narrative.model === null || typeof value.narrative.model === "string")))) {
+    && (value.narrative === undefined || (isRecord(value.narrative)
+      && (hasExactKeys(value.narrative, ["mode", "model"]) || hasExactKeys(value.narrative, ["mode", "provider", "model", "analysisTier"]))
+      && ["local", "byok", "cloud", "off"].includes(value.narrative.mode as string)
+      && (value.narrative.model === null || typeof value.narrative.model === "string")
+      && (!("provider" in value.narrative) || value.narrative.provider === null || ["openrouter", "openai", "ollama", "openai-compatible"].includes(value.narrative.provider as string))
+      && (!("analysisTier" in value.narrative) || ["standard", "deep"].includes(value.narrative.analysisTier as string))))) {
+    if (value.narrative && isRecord(value.narrative) && !("provider" in value.narrative)) {
+      value.narrative = { ...value.narrative, provider: null, analysisTier: "standard" };
+    }
     return value as unknown as StoredUploadGrant;
   }
 

@@ -10,17 +10,28 @@ import type { RawExcerptCandidate } from "./types.js";
  * traceable in every emitted snapshot.
  */
 export const NARRATIVE_EVIDENCE_POLICY_VERSION = "deterministic-heuristic-v1" as const;
+export const DEEP_NARRATIVE_EVIDENCE_POLICY_VERSION = "deep-evidence-v2" as const;
 export const DEFAULT_MAX_EXCERPTS = 40;
 export const DEFAULT_MAX_CHARS_PER_EXCERPT = 600;
 export const DEFAULT_MAX_TOTAL_EXCERPT_CHARS = 20_000;
 export const MAX_EXCERPTS_PER_SESSION = 6;
 export const MAX_ASSISTANT_DECISIONS_PER_SESSION = 3;
+// Deep uses the larger context as bounded capacity, while the CLI dynamically
+// lowers the byte allowance to keep the complete upload below its grant.
+export const DEEP_MAX_EXCERPTS = 240;
+export const DEEP_MAX_CHARS_PER_EXCERPT = 1_500;
+export const DEEP_MAX_TOTAL_EXCERPT_BYTES = 700 * 1024;
+export const DEEP_MAX_EXCERPTS_PER_SESSION = 12;
+export const DEEP_MAX_ASSISTANT_DECISIONS_PER_SESSION = 6;
 export const ASSISTANT_DECISION_MAX_RAW_CHARS = 600;
 
 export interface ExcerptBudget {
   maxExcerpts: number;
   maxCharsPerExcerpt: number;
   maxTotalChars: number;
+  maxTotalBytes?: number;
+  maxExcerptsPerSession?: number;
+  maxAssistantDecisionsPerSession?: number;
 }
 
 export interface SessionCandidateParts {
@@ -51,7 +62,7 @@ export function orderSessionCandidates(sessionRef: string, parts: SessionCandida
   if (lastUser && lastUser !== firstUser && !ordered.some((entry) => entry.text === lastUser.text)) {
     ordered.push({ sessionRef, role: "outcome", ...lastUser });
   }
-  return ordered.slice(0, MAX_EXCERPTS_PER_SESSION);
+  return ordered;
 }
 
 export interface SessionCandidateGroup {
@@ -95,6 +106,9 @@ export function selectNarrativeEvidence(
   let rejectedByRedaction = 0;
   let rejectedByBudget = 0;
   let totalChars = 0;
+  let totalBytes = 0;
+  const selectedBySession = new Map<string, number>();
+  const decisionsBySession = new Map<string, number>();
   const perProvider = new Map<ProviderId, { candidates: number; excerpts: number }>();
 
   const cursors = sorted.map(() => 0);
@@ -120,6 +134,15 @@ export function selectNarrativeEvidence(
         rejectedByBudget += 1;
         continue;
       }
+      const selectedForSession = selectedBySession.get(candidate.sessionRef) ?? 0;
+      if (selectedForSession >= (budget.maxExcerptsPerSession ?? MAX_EXCERPTS_PER_SESSION)) {
+        rejectedByBudget += 1;
+        continue;
+      }
+      if (candidate.role === "assistant-decision" && (decisionsBySession.get(candidate.sessionRef) ?? 0) >= (budget.maxAssistantDecisionsPerSession ?? MAX_ASSISTANT_DECISIONS_PER_SESSION)) {
+        rejectedByBudget += 1;
+        continue;
+      }
       const cleaned = redactor.cleanExcerpt(candidate.text, budget.maxCharsPerExcerpt);
       if (cleaned === null) {
         rejectedByRedaction += 1;
@@ -129,7 +152,13 @@ export function selectNarrativeEvidence(
         rejectedByBudget += 1;
         continue;
       }
+      const cleanedBytes = Buffer.byteLength(cleaned, "utf8");
+      if (budget.maxTotalBytes !== undefined && totalBytes + cleanedBytes > budget.maxTotalBytes) {
+        rejectedByBudget += 1;
+        continue;
+      }
       totalChars += cleaned.length;
+      totalBytes += cleanedBytes;
       excerpts.push({
         excerptId: `exc_${shortHash(`${candidate.sessionRef}\0${candidate.role}\0${candidate.occurredAt}\0${excerpts.length}`, 20)}`,
         sessionRef: candidate.sessionRef,
@@ -138,6 +167,8 @@ export function selectNarrativeEvidence(
         text: cleaned,
       });
       providerStats.excerpts += 1;
+      selectedBySession.set(candidate.sessionRef, selectedForSession + 1);
+      if (candidate.role === "assistant-decision") decisionsBySession.set(candidate.sessionRef, (decisionsBySession.get(candidate.sessionRef) ?? 0) + 1);
     }
   }
 

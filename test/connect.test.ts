@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 import { connectBuildStory } from "../src/connect.js";
+import { getStoredUploadGrant } from "../src/connection-state.js";
 import { PROJECT_SNAPSHOT_SCHEMA_VERSION } from "../src/contract.js";
 import { ScannerError } from "../src/errors.js";
 
@@ -24,6 +28,45 @@ test("mock connection is explicit and performs no network request", async () => 
     endpointOrigin: null,
     grantExpiresAt: null,
   });
+});
+
+test("connect advertises and persists BYOK narrative mode", async () => {
+  const stateDirectory = await mkdtemp(path.join(os.tmpdir(), "buildstory-byok-connect-"));
+  let advertisedModes: unknown;
+  try {
+    await connectBuildStory({
+      uploadSessionId: "session-byok-001",
+      deviceCode: "DEVICE-CODE-BYOK-001",
+      apiBaseUrl: "http://127.0.0.1:8787/",
+      stateDirectory,
+      fetchImplementation: async (_input, init) => {
+        advertisedModes = (JSON.parse(String(init?.body)) as { capabilities: { narrativeModes: unknown } }).capabilities.narrativeModes;
+        return new Response(JSON.stringify({
+          protocolVersion: "1.0",
+          status: "connected",
+          uploadSessionId: "session-byok-001",
+          connectionId: "connection-byok-001",
+          uploadGrant: {
+            bearerToken: "fixture-byok-bearer-token-001",
+            snapshotEndpoint: "/api/v1/cli/snapshots/byok-001",
+            expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
+            schemaVersion: PROJECT_SNAPSHOT_SCHEMA_VERSION,
+            maxBytes: 1024 * 1024,
+          },
+          narrative: { mode: "byok", model: "gpt-5.6-terra" },
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      },
+    });
+    assert.deepEqual(advertisedModes, ["local", "byok", "cloud", "off"]);
+    assert.deepEqual((await getStoredUploadGrant(stateDirectory))?.narrative, {
+      mode: "byok",
+      provider: null,
+      model: "gpt-5.6-terra",
+      analysisTier: "standard",
+    });
+  } finally {
+    await rm(stateDirectory, { recursive: true, force: true });
+  }
 });
 
 test("connect refuses credential-bearing and unpinned-http-remote endpoints regardless of --allow-host", async () => {

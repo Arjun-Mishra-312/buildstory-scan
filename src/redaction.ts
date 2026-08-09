@@ -66,7 +66,7 @@ const RULES: RedactionRule[] = [
   },
   {
     category: "sensitive-assignment",
-    pattern: /\b(?:api[_-]?key|secret(?:[_-]?key)?|client[_-]?secret|auth[_-]?token|token|password|passwd|pwd|private[_-]?key|database[_-]?url|connection[_-]?string)\s*(?::|=)\s*(?:"[^"\r\n]{4,}"|'[^'\r\n]{4,}'|[^\s,;&]{4,})/gi,
+    pattern: /\b(?:api[_-]?key|secret(?:[_-]?key)?|client[_-]?secret|auth[_-]?token|token|password|passwd|pwd|private[_-]?key|database[_-]?url|connection[_-]?string)["'`]?\s*(?::|=)\s*(?:"[^"\r\n]{4,}"|'[^'\r\n]{4,}'|`[^`\r\n]{4,}`|[^\s,;&]{4,})/gi,
     knownSecret: true,
   },
   {

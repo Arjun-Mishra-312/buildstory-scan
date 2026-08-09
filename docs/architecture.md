@@ -24,9 +24,9 @@ There is no repository/snapshot arrow into connect and no raw-input arrow into t
 
 `repository.ts` resolves the selected Git top-level directory and runs Git with optional locks disabled. It derives a stable fingerprint, sanitized display name/branch, HEAD, an opaque repository-path hash, working-tree counts, and time-windowed history aggregates. A remote host is used transiently only as fingerprint input and is never returned. Source files are never opened. `git status` materializes names locally, but only counts survive; `git log --shortstat` avoids diff/path output.
 
-`sources/codex.ts` is the first provider adapter. Discovery is deterministic and bounded by sorted traversal, depth/file limits, a 128 MiB file cap, a 4 MiB line cap, and no symlink following. An unrelated file closes when its metadata working directory proves it is out of scope. Matched message/reasoning bodies and tool arguments/results are counted by structural kind and discarded; they cannot enter the normalized provider result.
+Provider adapters for Codex, Claude Code, Cursor, and Google Antigravity use deterministic, bounded discovery with file/record limits and no symlink following. An unrelated record is rejected when its repository metadata proves it out of scope. Content fields are counted structurally and discarded unless the user explicitly selects a narrative mode that needs reviewed excerpts.
 
-`scanner.ts` derives a stable UTC window, filters sessions, aggregates model/tool/token use, computes the deterministic builder profile, builds structural milestones and opaque evidence, and produces the scan ID from canonical payload content. Local mode can pass redacted in-memory excerpts to an injected Ollama generator; those excerpts are removed before the snapshot is finalized. `redaction.ts` sanitizes retained strings. `validation.ts` uses the portable Draft 2020-12 schema. Identical inputs/options produce identical bytes when the same injected generator result is supplied.
+`scanner.ts` derives a stable UTC window, filters sessions, aggregates model/tool/token use, computes the deterministic builder profile, builds structural milestones and opaque evidence, and produces the scan ID from canonical payload content. Local mode can pass redacted in-memory excerpts to an injected Ollama generator; those excerpts are removed before the snapshot is finalized. BYOK uses the same non-serialized selection, but an awaited pre-generation hook prints the exact provider-bound facts/excerpts and requires consent before the generator can run. `redaction.ts` sanitizes retained strings. `validation.ts` uses the portable Draft 2020-12 schema. Identical inputs/options produce identical bytes when the same injected generator result is supplied.
 
 `connect.ts` preserves protocol 1.0's bounded POST request and validates its new nested upload grant. It accepts mock mode, loopback HTTP(S), or one explicit HTTPS host confirmed via `--allow-host`/`--remote`; rejects redirects, cookies, and any other or unconfirmed host; caps responses; and never persists the dashboard session ID, device code, or connection ID.
 
@@ -45,10 +45,9 @@ The ready file is atomically claimed and removed before PUT, preventing concurre
 
 ## Package and commands
 
-The private npm package declares:
+The public npm package declares:
 
 - `buildstory`, the advertised CLI;
-- `story-scanner`, a backward-compatible alias.
 
 Commands are deliberately separated:
 
@@ -60,13 +59,13 @@ Commands are deliberately separated:
 
 ## Determinism and schema sharing
 
-Files, sessions, warnings, tools, models, milestones, evidence, object keys, and Git provenance labels are sorted. Default time bounds derive from repository/session state, not wall clock. JSON keys use locale-independent lexicographic ordering. The current transport schema is `ProjectSnapshot 1.6.0`; the web app keeps frozen 1.3.0 and 1.2.0 validators for rollout compatibility. Scores are recomputed server-side from uploaded metrics; the scanner computes the same pure functions only to prompt local prose. The optional `timeWindow.utcOffsetMinutes` makes peak-hour analysis local-time aware without collecting a location name.
+Files, sessions, warnings, tools, models, milestones, evidence, object keys, and Git provenance labels are sorted. Default time bounds derive from repository/session state, not wall clock. JSON keys use locale-independent lexicographic ordering. The current transport schema is `ProjectSnapshot 1.7.0`; the web app retains compatible frozen validators for supported older uploads. Scores are recomputed server-side from uploaded metrics; the scanner computes the same pure functions only to prompt prose. The optional `timeWindow.utcOffsetMinutes` makes peak-hour analysis local-time aware without collecting a location name.
 
 The web app can import TypeScript exports from `buildstory-scan` and the portable schema from `buildstory-scan/schema`. The schema has no remote-host field and uses `additionalProperties: false` recursively.
 
 ## Adapter evolution
 
-Providers implement `SessionProviderAdapter` and return the normalized, content-free session shape. v1 admits Codex only. Another provider requires explicit schema/type evolution, adapter registration, bounded fixtures, and equivalent early repository scoping and fail-closed tests.
+Providers implement `SessionProviderAdapter` and return the normalized session shape. New or changed provider formats require explicit adapter registration, bounded fixtures, early repository scoping, and equivalent fail-closed tests.
 
 ## Reference provenance
 

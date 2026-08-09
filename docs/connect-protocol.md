@@ -19,12 +19,12 @@ The protocol version remains 1.0. New CLIs add an optional capability inside the
   "deviceCode": "DEVICE_CODE",
   "client": {
     "command": "buildstory",
-    "version": "0.4.0"
+    "version": "0.9.2"
   },
   "capabilities": {
-    "projectSnapshotSchemaVersions": ["1.6.0"],
+    "projectSnapshotSchemaVersions": ["1.7.0"],
     "snapshotUpload": false,
-    "narrativeModes": ["local", "cloud", "off"]
+    "narrativeModes": ["local", "byok", "cloud", "off"]
   }
 }
 ```
@@ -45,23 +45,28 @@ Success is HTTP 2xx and this strict JSON object, no larger than 64 KiB:
     "bearerToken": "SHORT_LIVED_ONE_USE_VALUE",
     "snapshotEndpoint": "/api/v1/cli/snapshots/OPAQUE_ID",
     "expiresAt": "2026-08-04T12:05:00.000Z",
-    "schemaVersion": "1.6.0",
+    "schemaVersion": "1.7.0",
     "maxBytes": 1048576
   },
-  "narrative": { "mode": "local", "model": "gemma4:12b" }
+  "narrative": {
+    "mode": "local",
+    "provider": "ollama",
+    "model": "gemma4:12b",
+    "analysisTier": "standard"
+  }
 }
 ```
 
 The `narrative` response block is sent only when the client advertised
 `capabilities.narrativeModes`. Older clients receive the original response
-shape and default to cloud behavior. The dashboard-selected mode/model is
+shape and default to standard cloud behavior. The dashboard-selected mode/provider/model/analysis tier is
 persisted beside the local grant so the later `scan-upload` invocation can
 enforce the mode without trusting command-line flags.
 
 The upload-session ID and protocol must match the request. `connectionId` is validated but never printed or persisted. The grant must:
 
 - expire in the future and no more than one hour after acceptance;
-- bind to `ProjectSnapshot 1.6.0`;
+- bind to `ProjectSnapshot 1.7.0`;
 - cap the body between 1 byte and the CLI's 8 MiB hard maximum;
 - provide a relative or absolute snapshot endpoint that resolves to the same origin as the explicit API base;
 - carry a non-empty bearer with no whitespace or control characters.

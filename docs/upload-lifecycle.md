@@ -11,11 +11,11 @@
 5. **Transmitting** — the CLI checks the body against both the server grant and the 8 MiB hard limit, then sends exactly the canonical snapshot JSON with no envelope.
 6. **Accepted** — a strict receipt must match the scan ID and local digest. Only a verified HTTP 2xx receipt counts as success.
 7. **Status-readable** — after acceptance, local state contains only the same bearer, expiry, schema, and same-origin status/report URLs. The bearer can no longer authorize PUT, but the web app may accept it for read-only GET until expiry.
-8. **Failed** — a content-free error is printed. Once an upload request was attempted, the CLI does not restore or silently retry the one-PUT grant because delivery could be ambiguous.
+8. **Failed** — a content-free error is printed and no automatic retry occurs. Network failures and designated retryable HTTP statuses restore the local grant for a manual retry. Server-side grants remain one-use, so an ambiguously accepted first request is refused if replayed.
 
 The `SnapshotTransport` interface accepts only a `ProjectSnapshot`. It cannot receive a repository path, session adapter, raw record, transcript, Git child-process output, source/diff body, device code, or diagnostic callback.
 
-`ProjectSnapshot 1.0.0`'s `sourceSelection.consent` records collection consent: local-scan itself still denies network upload. Transport consent is deliberately separate and is evidenced by the command-scoped `--upload-consent`, one-use grant, digest-bound request, and accepted receipt; it is not silently inferred from the source-selection statement.
+`ProjectSnapshot 1.7.0`'s `sourceSelection.consent` records collection consent: local-scan itself still denies network upload. Transport consent is deliberately separate and is evidenced by the command-scoped `--upload-consent`, one-use grant, digest-bound request, and accepted receipt; it is not silently inferred from the source-selection statement.
 
 ## Snapshot PUT
 
@@ -26,7 +26,7 @@ PUT /granted/snapshot/path HTTP/1.1
 Authorization: Bearer <one-use-grant>
 Content-Type: application/json
 Accept: application/json
-X-BuildStory-Schema-Version: 1.0.0
+X-BuildStory-Schema-Version: 1.7.0
 X-BuildStory-Snapshot-Digest: sha256:<64 lowercase hex characters>
 
 <the canonical ProjectSnapshot JSON object itself>

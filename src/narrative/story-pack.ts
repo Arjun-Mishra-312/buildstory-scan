@@ -1,7 +1,11 @@
 import type {
   GeneratedNarrativeSections,
   ProjectSnapshot,
+  ReportStoryPack,
   ReportStoryPackV2,
+  ReportStoryPackV3,
+  StoryPackFinding,
+  StoryPackRecommendation,
   StoryPackPhase,
   StoryPackSource,
 } from "../contract.js";
@@ -336,7 +340,7 @@ export function createDefaultStoryPack(snapshot: ProjectSnapshot, profile: Build
   };
 }
 
-export function sectionsFromStoryPack(pack: ReportStoryPackV2): GeneratedNarrativeSections {
+export function sectionsFromStoryPack(pack: ReportStoryPack): GeneratedNarrativeSections {
   return {
     headline: pack.hero.headline,
     narrative: pack.hero.summary,
@@ -352,7 +356,7 @@ export function sanitizeStoryPack(
   input: unknown,
   fallback: ReportStoryPackV2,
   redactor: Redactor,
-): { storyPack: ReportStoryPackV2; fallbacksUsed: string[] } {
+): { storyPack: ReportStoryPack; fallbacksUsed: string[] } {
   const candidate = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
   const allowed = new Set(fallback.sources.map((source) => source.ref));
   const fallbacks: string[] = [];
@@ -380,7 +384,7 @@ export function sanitizeStoryPack(
     };
   });
   const momentItems = Array.isArray(candidate.moments) ? candidate.moments : [];
-  const moments = momentItems.slice(0, 5).flatMap((value, index) => {
+  const moments = momentItems.slice(0, candidate.version === "3.0.0" ? 12 : 5).flatMap((value, index) => {
     const item = value && typeof value === "object" ? value as Record<string, unknown> : {};
     const fallbackItem = fallback.moments[index % fallback.moments.length]!;
     const phase = item.phase === "discover" || item.phase === "decide" || item.phase === "deliver" ? item.phase : fallbackItem.phase;
@@ -443,7 +447,58 @@ export function sanitizeStoryPack(
       sourceRefs: sourceList("growthEdge.sourceRefs", growth.sourceRefs, fallbackGrowth.sourceRefs),
     },
   };
-  return { storyPack, fallbacksUsed: [...new Set(fallbacks)].sort() };
+  const deep = candidate.version === "3.0.0" && candidate.deepAnalysis && typeof candidate.deepAnalysis === "object" && !Array.isArray(candidate.deepAnalysis)
+    ? candidate.deepAnalysis as Record<string, unknown>
+    : null;
+  if (!deep) return { storyPack, fallbacksUsed: [...new Set(fallbacks)].sort() };
+
+  const finding = (path: string, value: unknown, fallbackTitle = "Evidence-bound observation", fallbackSummary = "The reviewed evidence supports only a cautious conclusion."): StoryPackFinding => {
+    const item = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+    return {
+      title: clean(`${path}.title`, item.title, fallbackTitle, LIMITS.title),
+      summary: clean(`${path}.summary`, item.summary, fallbackSummary, 600),
+      sourceRefs: sourceList(`${path}.sourceRefs`, item.sourceRefs, fallback.sources[0]?.ref ? [fallback.sources[0].ref] : []),
+      confidence: item.confidence === "high" || item.confidence === "medium" ? item.confidence : "low",
+    };
+  };
+  const findings = (path: string, value: unknown, max: number): StoryPackFinding[] => Array.isArray(value)
+    ? value.slice(0, max).map((item, index) => finding(`${path}.${index}`, item))
+    : [];
+  const recommendations: StoryPackRecommendation[] = Array.isArray(deep.nextBuildActions)
+    ? deep.nextBuildActions.slice(0, 6).map((value, index) => {
+        const item = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+        return {
+          ...finding(`deepAnalysis.nextBuildActions.${index}`, value, "Next build action", "Address the strongest evidence-backed opportunity in the next chapter."),
+          priority: item.priority === "now" || item.priority === "later" ? item.priority : "next",
+          rationale: clean(`deepAnalysis.nextBuildActions.${index}.rationale`, item.rationale, "Prioritized from the reviewed evidence.", 600),
+        };
+      })
+    : [];
+  const coverageValue = deep.coverage && typeof deep.coverage === "object" && !Array.isArray(deep.coverage) ? deep.coverage as Record<string, unknown> : {};
+  const boundedCount = (value: unknown, max: number) => typeof value === "number" && Number.isSafeInteger(value) ? Math.max(0, Math.min(max, value)) : 0;
+  const iso = (value: unknown) => typeof value === "string" && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString() : "1970-01-01T00:00:00.000Z";
+  const deepPack: ReportStoryPackV3 = {
+    ...storyPack,
+    version: "3.0.0",
+    analysisTier: "deep",
+    deepAnalysis: {
+      executiveSynthesis: finding("deepAnalysis.executiveSynthesis", deep.executiveSynthesis, storyPack.hero.headline, storyPack.hero.summary),
+      decisionReview: findings("deepAnalysis.decisionReview", deep.decisionReview, 8),
+      frictionAndRecovery: findings("deepAnalysis.frictionAndRecovery", deep.frictionAndRecovery, 6),
+      engineeringPatterns: findings("deepAnalysis.engineeringPatterns", deep.engineeringPatterns, 6),
+      risksAndEvidenceGaps: findings("deepAnalysis.risksAndEvidenceGaps", deep.risksAndEvidenceGaps, 5),
+      nextBuildActions: recommendations,
+      chapterChanges: findings("deepAnalysis.chapterChanges", deep.chapterChanges, 5),
+      coverage: {
+        sessionsSeen: boundedCount(coverageValue.sessionsSeen, 100_000),
+        excerptsUsed: boundedCount(coverageValue.excerptsUsed, 240),
+        evidenceBytes: boundedCount(coverageValue.evidenceBytes, 700 * 1024),
+        windowStart: iso(coverageValue.windowStart),
+        windowEnd: iso(coverageValue.windowEnd),
+      },
+    },
+  };
+  return { storyPack: deepPack, fallbacksUsed: [...new Set(fallbacks)].sort() };
 }
 
 export function buildStoryPackSources(snapshot: ProjectSnapshot, excerpts: Array<{ sessionRef: string }>): StoryPackSource[] {

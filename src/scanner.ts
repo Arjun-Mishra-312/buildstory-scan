@@ -35,7 +35,7 @@ import { createAdapters, defaultProviderIds, isRegisteredProvider } from "./sour
 import type { ProviderDiscoveryResult, ProviderSession, RawExcerptCandidate, SessionProviderAdapter } from "./sources/types.js";
 import { validateProjectSnapshot } from "./validation.js";
 import { computeBuilderProfile, defaultProfileNarrative } from "./insights/profile.js";
-import type { LocalNarrativeGenerator } from "./narrative/local.js";
+import type { LocalNarrativeGenerator, LocalNarrativeInput } from "./narrative/local.js";
 import type { ScanProgressReporter } from "./progress.js";
 import { createDefaultStoryPack, sanitizeStoryPack, sectionsFromStoryPack } from "./narrative/story-pack.js";
 import { estimateSessionCostMicroUsd, SESSION_PRICING_TABLE_VERSION } from "./session-pricing.js";
@@ -66,7 +66,13 @@ export interface ScanOptions {
     maxExcerpts?: number;
     maxCharsPerExcerpt?: number;
     maxTotalChars?: number;
+    maxTotalBytes?: number;
+    maxExcerptsPerSession?: number;
+    maxAssistantDecisionsPerSession?: number;
+    policyVersion?: "deterministic-heuristic-v1" | "deep-evidence-v2";
   };
+  /** Local/BYOK-only selection budget. Unlike narrativeEvidence, this never serializes excerpts into the snapshot. */
+  narrativeEvidenceBudget?: NonNullable<ScanOptions["narrativeEvidence"]>;
   /** Explicit generation mode. Absent means cloud for legacy evidence callers, otherwise off. */
   narrative?: {
     mode: "local" | "cloud" | "off";
@@ -74,6 +80,12 @@ export interface ScanOptions {
   };
   /** Injected so tests and alternative local runtimes never need a model or network. */
   narrativeGenerator?: LocalNarrativeGenerator;
+  /**
+   * Optional consent gate invoked after redaction/selection but before a
+   * local-compatible narrative generator receives any data. The CLI uses
+   * this for BYOK so the review is genuinely pre-send.
+   */
+  beforeNarrativeGeneration?: (input: Pick<LocalNarrativeInput, "snapshot" | "profile" | "excerpts">) => Promise<void> | void;
   /** Content-free lifecycle events for CLI/UI progress rendering. */
   onProgress?: ScanProgressReporter;
 }
@@ -577,11 +589,14 @@ export async function buildProjectSnapshot(options: ScanOptions): Promise<Projec
   let localPromptExcerpts: Array<{ role: string; text: string; sessionRef: string }> = [];
   if (needsNarrativeEvidenceSelection) {
     reportProgress(options, { stage: "selecting-evidence", state: "start", message: "Selecting and redacting narrative evidence." });
-    const requestedBudget = options.narrativeEvidence;
+    const requestedBudget = options.narrativeEvidence ?? options.narrativeEvidenceBudget;
     const budget = {
       maxExcerpts: requestedBudget?.maxExcerpts ?? DEFAULT_MAX_EXCERPTS,
       maxCharsPerExcerpt: requestedBudget?.maxCharsPerExcerpt ?? DEFAULT_MAX_CHARS_PER_EXCERPT,
       maxTotalChars: requestedBudget?.maxTotalChars ?? DEFAULT_MAX_TOTAL_EXCERPT_CHARS,
+      ...(requestedBudget?.maxTotalBytes !== undefined ? { maxTotalBytes: requestedBudget.maxTotalBytes } : {}),
+      ...(requestedBudget?.maxExcerptsPerSession !== undefined ? { maxExcerptsPerSession: requestedBudget.maxExcerptsPerSession } : {}),
+      ...(requestedBudget?.maxAssistantDecisionsPerSession !== undefined ? { maxAssistantDecisionsPerSession: requestedBudget.maxAssistantDecisionsPerSession } : {}),
     };
     const eventContext = {
       repositoryRoot: repository.rootPath,
@@ -614,7 +629,7 @@ export async function buildProjectSnapshot(options: ScanOptions): Promise<Projec
     if (narrativeMode === "cloud") narrativeEvidence = {
       bundleVersion: NARRATIVE_EVIDENCE_BUNDLE_VERSION,
       generatedAt: timeWindow.end,
-      policy: { ...budget, excerptSelection: "deterministic-heuristic-v1" },
+      policy: { ...budget, excerptSelection: requestedBudget?.policyVersion ?? "deterministic-heuristic-v1" },
       consent: {
         mode: "explicit-cli-review",
         statementVersion: NARRATIVE_EVIDENCE_CONSENT_VERSION,
@@ -709,6 +724,11 @@ export async function buildProjectSnapshot(options: ScanOptions): Promise<Projec
       git: snapshotWithoutId.git,
       timeWindow: snapshotWithoutId.timeWindow,
     });
+    await options.beforeNarrativeGeneration?.({
+      snapshot: snapshotWithoutId,
+      profile,
+      excerpts: localPromptExcerpts,
+    });
     const result = await options.narrativeGenerator({
       snapshot: snapshotWithoutId,
       profile,
@@ -725,7 +745,7 @@ export async function buildProjectSnapshot(options: ScanOptions): Promise<Projec
       : result.sections;
     const sanitized = sanitizeLocalNarrative(projectedSections, defaults.sections, redactor);
     generatedNarrative = {
-      version: "2.0.0",
+      version: sanitizedPack.storyPack.version === "3.0.0" ? "3.0.0" : "2.0.0",
       generatedAt: timeWindow.end,
       mode: "local",
       provider: result.provider,

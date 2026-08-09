@@ -8,6 +8,54 @@ import { readLocalDashboardStatus, uploadProjectSnapshot } from "../src/local-up
 import { buildProjectSnapshot } from "../src/scanner.js";
 import { createLocalFixture } from "./helpers.js";
 
+test("upload errors never surface an untrusted server response body", async () => {
+  const fixture = await createLocalFixture();
+  const stateDirectory = path.join(fixture.root, "content-free-upload-error-state");
+  const serverSecret = "server-secret-that-must-never-reach-terminal";
+  try {
+    await connectBuildStory({
+      uploadSessionId: "session-error-001",
+      deviceCode: "DEVICE-CODE-ERROR-001",
+      apiBaseUrl: "http://127.0.0.1:8787/",
+      stateDirectory,
+      fetchImplementation: async () => new Response(JSON.stringify({
+        protocolVersion: "1.0",
+        status: "connected",
+        uploadSessionId: "session-error-001",
+        connectionId: "connection-error-001",
+        uploadGrant: {
+          bearerToken: "fixture-error-one-use-bearer-token-001",
+          snapshotEndpoint: "/api/v1/cli/snapshots/error-001",
+          expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
+          schemaVersion: PROJECT_SNAPSHOT_SCHEMA_VERSION,
+          maxBytes: 1024 * 1024,
+        },
+        narrative: { mode: "off", model: null },
+      }), { status: 200, headers: { "content-type": "application/json" } }),
+    });
+    const snapshot = await buildProjectSnapshot({
+      repositoryPath: fixture.repository,
+      consent: "local-scan",
+      providers: ["codex"],
+      codexHome: fixture.codexHome,
+      since: "2026-08-03T00:00:00Z",
+      until: "2026-08-04T00:00:00Z",
+    });
+    await assert.rejects(
+      uploadProjectSnapshot(snapshot, {
+        stateDirectory,
+        fetchImplementation: async () => new Response(JSON.stringify({ error: { message: serverSecret, details: [serverSecret] } }), { status: 500 }),
+      }),
+      (error: unknown) => error instanceof ScannerError
+        && error.code === "UPLOAD_REJECTED"
+        && !error.message.includes(serverSecret)
+        && error.message.includes("manual retry"),
+    );
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test("a pinned HTTPS remote host completes connect, upload, and status without any loopback endpoint", async () => {
   const fixture = await createLocalFixture();
   const stateDirectory = path.join(fixture.root, "remote-e2e-state");

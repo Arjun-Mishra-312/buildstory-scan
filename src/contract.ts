@@ -2,7 +2,7 @@
 
 export const PROJECT_SNAPSHOT_SCHEMA_VERSION = "1.7.0" as const;
 export const SCANNER_NAME = "buildstory" as const;
-export const SCANNER_VERSION = "0.9.1" as const;
+export const SCANNER_VERSION = "0.9.2" as const;
 export const CONSENT_STATEMENT_VERSION = "1.0" as const;
 /** Separate, additional consent for the opt-in narrativeEvidence bundle only. */
 export const NARRATIVE_EVIDENCE_CONSENT_VERSION = "1.0" as const;
@@ -20,6 +20,8 @@ export type Sha256Digest = `sha256:${string}`;
  * distinguishes Ollama from a BYOK model in the uploaded snapshot.
  */
 export type NarrativeMode = "local" | "byok" | "cloud" | "off";
+export type NarrativeProvider = "openrouter" | "openai" | "ollama" | "openai-compatible";
+export type AnalysisTier = "standard" | "deep";
 
 /**
  * Every AI coding-session source this scanner can read. gemini-antigravity
@@ -87,7 +89,8 @@ export interface NarrativeEvidenceBundle {
     maxExcerpts: number;
     maxCharsPerExcerpt: number;
     maxTotalChars: number;
-    excerptSelection: "deterministic-heuristic-v1";
+    maxTotalBytes?: number;
+    excerptSelection: "deterministic-heuristic-v1" | "deep-evidence-v2";
   };
   /** Separate from sourceSelection.consent; specifically authorizes this bundle's transmission. */
   consent: {
@@ -237,15 +240,34 @@ export interface ReportStoryPackV2 {
   };
 }
 
+export type StoryPackConfidence = "high" | "medium" | "low";
+export type StoryPackFinding = { title: string; summary: string; sourceRefs: string[]; confidence: StoryPackConfidence };
+export type StoryPackRecommendation = StoryPackFinding & { priority: "now" | "next" | "later"; rationale: string };
+export interface ReportStoryPackV3 extends Omit<ReportStoryPackV2, "version"> {
+  version: "3.0.0";
+  analysisTier: AnalysisTier;
+  deepAnalysis?: {
+    executiveSynthesis: StoryPackFinding;
+    decisionReview: StoryPackFinding[];
+    frictionAndRecovery: StoryPackFinding[];
+    engineeringPatterns: StoryPackFinding[];
+    risksAndEvidenceGaps: StoryPackFinding[];
+    nextBuildActions: StoryPackRecommendation[];
+    chapterChanges: StoryPackFinding[];
+    coverage: { sessionsSeen: number; excerptsUsed: number; evidenceBytes: number; windowStart: IsoDateTime; windowEnd: IsoDateTime };
+  };
+}
+export type ReportStoryPack = ReportStoryPackV2 | ReportStoryPackV3;
+
 export interface GeneratedNarrative {
-  version: "1.0.0" | "2.0.0";
+  version: "1.0.0" | "2.0.0" | "3.0.0";
   generatedAt: IsoDateTime;
   mode: "local";
   provider: string;
   model: string;
   sections: GeneratedNarrativeSections;
   /** Present for new reports; legacy sections remain readable during rollout. */
-  storyPack?: ReportStoryPackV2;
+  storyPack?: ReportStoryPack;
   fallbacksUsed: string[];
 }
 

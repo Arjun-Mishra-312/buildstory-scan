@@ -1,4 +1,4 @@
-import type { GeneratedNarrativeSections, ProjectSnapshot, ReportStoryPackV2 } from "../contract.js";
+import type { AnalysisTier, GeneratedNarrativeSections, NarrativeProvider, ProjectSnapshot, ReportStoryPack } from "../contract.js";
 import { defaultProfileNarrative, type BuilderProfile } from "../insights/profile.js";
 import type { Redactor } from "../redaction.js";
 import type { ScanProgressReporter } from "../progress.js";
@@ -30,7 +30,7 @@ export type LocalNarrativeGenerator = (input: LocalNarrativeInput) => Promise<{
   provider: string;
   model: string;
   sections: GeneratedNarrativeSections;
-  storyPack?: ReportStoryPackV2;
+  storyPack?: ReportStoryPack;
   fallbacksUsed: string[];
 }>;
 
@@ -55,6 +55,35 @@ const SECTION_LIMITS = {
   learning: 300,
   growthEdge: 500,
 };
+
+const DEEP_FINDING_SCHEMA = {
+  type: "object", additionalProperties: false,
+  required: ["title", "summary", "sourceRefs", "confidence"],
+  properties: {
+    title: { type: "string", maxLength: 120 }, summary: { type: "string", maxLength: 600 },
+    sourceRefs: { type: "array", minItems: 1, maxItems: 6, uniqueItems: true, items: { type: "string" } },
+    confidence: { type: "string", enum: ["high", "medium", "low"] },
+  },
+} as const;
+const DEEP_ANALYSIS_SCHEMA = {
+  type: "object", additionalProperties: false,
+  required: ["executiveSynthesis", "decisionReview", "frictionAndRecovery", "engineeringPatterns", "risksAndEvidenceGaps", "nextBuildActions", "chapterChanges"],
+  properties: {
+    executiveSynthesis: DEEP_FINDING_SCHEMA,
+    decisionReview: { type: "array", maxItems: 8, items: DEEP_FINDING_SCHEMA },
+    frictionAndRecovery: { type: "array", maxItems: 6, items: DEEP_FINDING_SCHEMA },
+    engineeringPatterns: { type: "array", maxItems: 6, items: DEEP_FINDING_SCHEMA },
+    risksAndEvidenceGaps: { type: "array", maxItems: 5, items: DEEP_FINDING_SCHEMA },
+    nextBuildActions: { type: "array", maxItems: 6, items: { ...DEEP_FINDING_SCHEMA, required: [...DEEP_FINDING_SCHEMA.required, "priority", "rationale"], properties: { ...DEEP_FINDING_SCHEMA.properties, priority: { type: "string", enum: ["now", "next", "later"] }, rationale: { type: "string", maxLength: 600 } } } },
+    chapterChanges: { type: "array", maxItems: 5, items: DEEP_FINDING_SCHEMA },
+  },
+} as const;
+const DEEP_REPORT_SCHEMA = {
+  type: "object", additionalProperties: false,
+  required: [...STORY_PACK_STORY_SCHEMA.required, ...STORY_PACK_INSIGHTS_SCHEMA.required, "deepAnalysis"],
+  properties: { ...STORY_PACK_STORY_SCHEMA.properties, ...STORY_PACK_INSIGHTS_SCHEMA.properties, deepAnalysis: DEEP_ANALYSIS_SCHEMA },
+} as const;
+type ByokComponent = StoryPackComponent | "deep" | "deep-report";
 
 function localBaseUrl(raw = process.env.BUILDSTORY_OLLAMA_BASE_URL?.trim() || DEFAULT_OLLAMA_URL): URL {
   let url: URL;
@@ -81,15 +110,19 @@ function localBaseUrl(raw = process.env.BUILDSTORY_OLLAMA_BASE_URL?.trim() || DE
  * credential-free HTTPS URL, matching the same rule the web app applies to
  * BUILDSTORY_LLM_BASE_URL for the subsidized cloud path.
  */
-function byokConfig(): { baseUrl: string; apiKey: string; model: string | null } {
-  const apiKey = process.env.BUILDSTORY_BYOK_API_KEY?.trim();
+function byokConfig(provider: NarrativeProvider): { baseUrl: string; apiKey: string; model: string | null; provider: "openrouter" | "openai" } {
+  const resolvedProvider = provider === "openai" ? "openai" : "openrouter";
+  const apiKey = (resolvedProvider === "openrouter" ? process.env.BUILDSTORY_OPENROUTER_API_KEY : process.env.BUILDSTORY_OPENAI_API_KEY)?.trim()
+    || process.env.BUILDSTORY_BYOK_API_KEY?.trim();
   if (!apiKey) {
     throw new LocalNarrativeGenerationError(
       "local_provider_unavailable",
-      "Bring-your-own-key mode requires BUILDSTORY_BYOK_API_KEY. Set it, BUILDSTORY_BYOK_BASE_URL, and optionally BUILDSTORY_BYOK_MODEL before scanning.",
+      `Bring-your-own-key ${resolvedProvider} mode requires ${resolvedProvider === "openrouter" ? "BUILDSTORY_OPENROUTER_API_KEY" : "BUILDSTORY_OPENAI_API_KEY"}. Legacy BUILDSTORY_BYOK_API_KEY is also supported.`,
     );
   }
-  const rawBaseUrl = process.env.BUILDSTORY_BYOK_BASE_URL?.trim() || "https://api.openai.com/v1";
+  const rawBaseUrl = (resolvedProvider === "openrouter" ? process.env.BUILDSTORY_OPENROUTER_BASE_URL : process.env.BUILDSTORY_OPENAI_BASE_URL)?.trim()
+    || process.env.BUILDSTORY_BYOK_BASE_URL?.trim()
+    || (resolvedProvider === "openrouter" ? "https://openrouter.ai/api/v1" : "https://api.openai.com/v1");
   let parsed: URL;
   try {
     parsed = new URL(rawBaseUrl);
@@ -99,8 +132,9 @@ function byokConfig(): { baseUrl: string; apiKey: string; model: string | null }
   if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.search || parsed.hash) {
     throw new LocalNarrativeGenerationError("local_provider_unavailable", "BUILDSTORY_BYOK_BASE_URL must be a credential-free HTTPS URL.");
   }
-  const model = process.env.BUILDSTORY_BYOK_MODEL?.trim() || null;
-  return { baseUrl: parsed.href.replace(/\/$/, ""), apiKey, model };
+  const model = (resolvedProvider === "openrouter" ? process.env.BUILDSTORY_OPENROUTER_MODEL : process.env.BUILDSTORY_OPENAI_MODEL)?.trim()
+    || process.env.BUILDSTORY_BYOK_MODEL?.trim() || null;
+  return { baseUrl: parsed.href.replace(/\/$/, ""), apiKey, model, provider: resolvedProvider };
 }
 
 function extractJson(content: string): unknown {
@@ -127,7 +161,7 @@ function stringList(value: unknown, maxItems: number, maxLength: number): string
     .map((item) => item.trim().slice(0, maxLength));
 }
 
-function facts(input: LocalNarrativeInput): string {
+function facts(input: LocalNarrativeInput, includeExcerpts = true): string {
   const { snapshot, profile } = input;
   const scoreLines = Object.entries(profile.scores)
     .map(([key, score]) => `${key}: ${score.value}/100; raw inputs ${JSON.stringify(score.rawInputs)}; formula ${score.formula}`)
@@ -140,7 +174,7 @@ function facts(input: LocalNarrativeInput): string {
     `Archetype rationale: ${profile.archetype.rationale.join(" ")}`,
     `Scores:\n${scoreLines}`,
     `Work patterns: peak hours ${profile.workPatterns.peakHours.join(", ") || "none"}; preferred days ${profile.workPatterns.preferredDays.join(", ") || "none"}; median session ${profile.workPatterns.medianSessionMinutes} minutes; longest ${profile.workPatterns.longestSessionMinutes} minutes; primary model ${profile.workPatterns.primaryModel ?? "none"}; timezone ${profile.workPatterns.timezoneLabel}.`,
-    `Redacted excerpts:\n${input.excerpts.length ? input.excerpts.map((excerpt) => `[${excerpt.role}] ${excerpt.text}`).join("\n\n") : "none"}`,
+    ...(includeExcerpts ? [`Redacted excerpts:\n${input.excerpts.length ? input.excerpts.map((excerpt) => `[${excerpt.role}] ${excerpt.text}`).join("\n\n") : "none"}`] : []),
   ].join("\n");
 }
 
@@ -232,7 +266,9 @@ async function callByok(
   model: string,
   prompt: string,
   timeoutMs: number,
-  component: StoryPackComponent,
+  component: ByokComponent,
+  provider: "openrouter" | "openai",
+  analysisTier: AnalysisTier,
 ): Promise<unknown> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -251,12 +287,16 @@ async function callByok(
           response_format: {
             type: "json_schema",
             json_schema: {
-              name: component === "story" ? "buildstory_story" : "buildstory_insights",
+              name: component === "story" ? "buildstory_story" : component === "insights" ? "buildstory_insights" : component === "deep" ? "buildstory_deep_analysis" : "buildstory_deep_report",
               strict: true,
-              schema: component === "story" ? STORY_PACK_STORY_SCHEMA : STORY_PACK_INSIGHTS_SCHEMA,
+              schema: component === "story" ? STORY_PACK_STORY_SCHEMA : component === "insights" ? STORY_PACK_INSIGHTS_SCHEMA : component === "deep" ? DEEP_ANALYSIS_SCHEMA : DEEP_REPORT_SCHEMA,
             },
           },
-          max_tokens: 1_500,
+          ...(provider === "openrouter" ? {
+            provider: { zdr: true, data_collection: "deny", require_parameters: true, allow_fallbacks: true },
+            ...(analysisTier === "deep" ? { reasoning: { effort: "high", exclude: true } } : {}),
+          } : { store: false }),
+          max_tokens: analysisTier === "deep" ? 40_000 : 4_000,
         }),
         signal: controller.signal,
       });
@@ -311,10 +351,10 @@ async function callOllamaWithRepair(url: URL, model: string, prompt: string, tim
   return {};
 }
 
-async function callByokWithRepair(baseUrl: string, apiKey: string, model: string, prompt: string, timeoutMs: number, allowedRefs: Set<string>, component: StoryPackComponent): Promise<unknown> {
+async function callByokWithRepair(baseUrl: string, apiKey: string, model: string, prompt: string, timeoutMs: number, allowedRefs: Set<string>, component: StoryPackComponent, provider: "openrouter" | "openai", analysisTier: AnalysisTier): Promise<unknown> {
   let currentPrompt = prompt;
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    const value = await callByok(baseUrl, apiKey, model, currentPrompt, timeoutMs, component);
+    const value = await callByok(baseUrl, apiKey, model, currentPrompt, timeoutMs, component, provider, analysisTier);
     const invalid = unknownSourceRefs(value, allowedRefs);
     const validation = validateStoryPackComponent(value, component, allowedRefs);
     if ((!invalid.length && validation.ok) || attempt === 1) return value;
@@ -325,6 +365,18 @@ async function callByokWithRepair(baseUrl: string, apiKey: string, model: string
     currentPrompt = `${prompt}\nValidation feedback: ${feedback}. Retry with one JSON object matching the requested component schema and only the provided source references.`;
   }
   return {};
+}
+
+async function callByokDeepWithRepair(baseUrl: string, apiKey: string, model: string, prompt: string, timeoutMs: number, allowedRefs: Set<string>, provider: "openrouter" | "openai", component: "deep" | "deep-report" = "deep"): Promise<unknown> {
+  let currentPrompt = prompt;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const value = await callByok(baseUrl, apiKey, model, currentPrompt, timeoutMs, component, provider, "deep");
+    const invalid = unknownSourceRefs(value, allowedRefs);
+    const objectValue = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+    if (!invalid.length && objectValue && (component === "deep" || (objectValue.deepAnalysis && typeof objectValue.deepAnalysis === "object"))) return value;
+    currentPrompt = `${prompt}\nValidation feedback: use only these source references: ${[...allowedRefs].join(", ")}. Return one JSON object and no prose.`;
+  }
+  throw new LocalNarrativeGenerationError("local_provider_invalid_response", "The configured provider returned invalid deep analysis after repair.");
 }
 
 async function resolveOllamaModel(url: URL, requestedModel: string | null | undefined, timeoutMs: number): Promise<string> {
@@ -409,7 +461,7 @@ async function runNarrativeGeneration(
   provider: string,
   model: string,
   callComponentWithRepair: (prompt: string, allowedRefs: Set<string>, component: StoryPackComponent) => Promise<unknown>,
-): Promise<{ provider: string; model: string; sections: GeneratedNarrativeSections; storyPack?: ReportStoryPackV2; fallbacksUsed: string[] }> {
+): Promise<{ provider: string; model: string; sections: GeneratedNarrativeSections; storyPack?: ReportStoryPack; fallbacksUsed: string[] }> {
   const defaultPack = createDefaultStoryPack(input.snapshot as ProjectSnapshot, input.profile, input.excerpts);
   const sourceRefSet = new Set(defaultPack.sources.map((source) => source.ref));
   const sourceRefs = [...sourceRefSet].filter((ref) => ref !== "GIT").join(", ");
@@ -485,10 +537,10 @@ export function createOllamaNarrativeGenerator(requestedModel?: string | null): 
  * progress event (ephemeral, local-only, never part of the snapshot) but not
  * safe to persist in an uploaded field.
  */
-export function createByokNarrativeGenerator(requestedModel?: string | null): LocalNarrativeGenerator {
+export function createByokNarrativeGenerator(requestedModel?: string | null, provider: NarrativeProvider = "openrouter", analysisTier: AnalysisTier = "standard"): LocalNarrativeGenerator {
   return async (input) => {
-    const config = byokConfig();
-    const model = requestedModel?.trim() || config.model || "gpt-5.6-luna";
+    const config = byokConfig(provider);
+    const model = requestedModel?.trim() || config.model || (config.provider === "openrouter" ? "deepseek/deepseek-v4-flash" : "gpt-5.6-luna");
     const timeoutMs = boundedEnvironmentInteger("BUILDSTORY_BYOK_TIMEOUT_MS", DEFAULT_TIMEOUT_MS, 1_000, 300_000);
     const hostForProgressOnly = (() => {
       try {
@@ -498,7 +550,35 @@ export function createByokNarrativeGenerator(requestedModel?: string | null): Lo
       }
     })();
     input.onProgress?.({ stage: "resolving-model", state: "complete", model, message: `Using configured model ${model} via ${hostForProgressOnly}.` });
-    return runNarrativeGeneration(input, "byok", model, (prompt, allowedRefs, component) =>
-      callByokWithRepair(config.baseUrl, config.apiKey, model, prompt, timeoutMs, allowedRefs, component));
+    if (analysisTier === "deep") {
+      const defaultPack = createDefaultStoryPack(input.snapshot as ProjectSnapshot, input.profile, input.excerpts);
+      const allowedRefs = new Set(defaultPack.sources.map((source) => source.ref));
+      const analysisPrompt = `${facts(input)}\n\nProduce the private analysis map with executiveSynthesis, decisionReview, frictionAndRecovery, engineeringPatterns, risksAndEvidenceGaps, nextBuildActions, and chapterChanges. Every claim must cite only: ${[...allowedRefs].join(", ")}. Leave lists empty when evidence is insufficient.`;
+      const analysis = await callByokDeepWithRepair(config.baseUrl, config.apiKey, model, analysisPrompt, timeoutMs, allowedRefs, config.provider, "deep");
+      const synthesisPrompt = `${facts(input, false)}\n\nSOURCE REFS: ${[...allowedRefs].join(", ")}\n\nPRIVATE ANALYSIS MAP:\n${JSON.stringify(analysis)}\n\nCreate one layered StoryPackV3 JSON object. Use 6-12 moments only when supported. Do not invent claims or source references.`;
+      const synthesized = await callByokDeepWithRepair(config.baseUrl, config.apiKey, model, synthesisPrompt, timeoutMs, allowedRefs, config.provider, "deep-report");
+      const candidate = synthesized && typeof synthesized === "object" && !Array.isArray(synthesized) ? synthesized as Record<string, unknown> : {};
+      const deep = candidate.deepAnalysis && typeof candidate.deepAnalysis === "object" && !Array.isArray(candidate.deepAnalysis) ? candidate.deepAnalysis as Record<string, unknown> : analysis as Record<string, unknown>;
+      const withCoverage = {
+        ...candidate,
+        version: "3.0.0",
+        analysisTier: "deep",
+        deepAnalysis: {
+          ...deep,
+          coverage: {
+            sessionsSeen: input.snapshot.sessions.length,
+            excerptsUsed: input.excerpts.length,
+            evidenceBytes: Buffer.byteLength(input.excerpts.map((excerpt) => excerpt.text).join(""), "utf8"),
+            windowStart: input.snapshot.timeWindow.start,
+            windowEnd: input.snapshot.timeWindow.end,
+          },
+        },
+      };
+      const normalized = sanitizeStoryPack(withCoverage, defaultPack, input.redactor);
+      return { provider: config.provider, model, storyPack: normalized.storyPack, sections: sectionsFromStoryPack(normalized.storyPack), fallbacksUsed: normalized.fallbacksUsed };
+    }
+    const generated = await runNarrativeGeneration(input, config.provider, model, (prompt, allowedRefs, component) =>
+      callByokWithRepair(config.baseUrl, config.apiKey, model, prompt, timeoutMs, allowedRefs, component, config.provider, analysisTier));
+    return generated;
   };
 }

@@ -269,12 +269,11 @@ export async function uploadProjectSnapshot(
   }
   if (!response.ok) {
     const retryable = response.status === 408 || response.status === 409 || response.status === 425 || response.status === 429 || response.status >= 500;
-    const body = (await response.json().catch(() => null)) as { error?: { message?: string; details?: string[] } } | null;
     await lease.release(retryable ? "retryable" : "terminal");
     await response.body?.cancel().catch(() => undefined);
     throw new ScannerError(
       "UPLOAD_REJECTED",
-      `The local dashboard rejected the validated snapshot (HTTP ${response.status}). ${body?.error?.message ?? "Request rejected."}${body?.error?.details?.length ? ` Details: ${body.error.details.join("; ")}` : ""}${retryable ? " The grant remains available for a retry." : " The grant cannot be reused."}`,
+      `The local dashboard rejected the validated snapshot (HTTP ${response.status}).${retryable ? " The local grant remains available for a manual retry; the server may still refuse a grant it already accepted." : " The grant cannot be reused."}`,
     );
   }
   const responseValue = await readBoundedJson(response, "UPLOAD_RESPONSE");

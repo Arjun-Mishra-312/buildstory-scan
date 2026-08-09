@@ -6,7 +6,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { canonicalJson } from "./canonical-json.js";
 import { connectBuildStory } from "./connect.js";
-import type { ProjectSnapshot, ProviderId } from "./contract.js";
+import type { AnalysisTier, NarrativeProvider, ProjectSnapshot, ProviderId } from "./contract.js";
 import { PROJECT_SNAPSHOT_SCHEMA_VERSION, SCANNER_VERSION } from "./contract.js";
 import { getStoredUploadGrant } from "./connection-state.js";
 import { ScannerError, safeErrorMessage } from "./errors.js";
@@ -18,6 +18,13 @@ import { inspectRepository } from "./repository.js";
 import { buildProjectSnapshot, inspectSelectedRepository, providerLabel } from "./scanner.js";
 import { isRegisteredProvider, REGISTERED_PROVIDER_IDS } from "./sources/registry.js";
 import type { ScanProgressEvent, ScanProgressReporter } from "./progress.js";
+import {
+  DEEP_MAX_ASSISTANT_DECISIONS_PER_SESSION,
+  DEEP_MAX_CHARS_PER_EXCERPT,
+  DEEP_MAX_EXCERPTS,
+  DEEP_MAX_EXCERPTS_PER_SESSION,
+  DEEP_MAX_TOTAL_EXCERPT_BYTES,
+} from "./sources/narrative-evidence.js";
 
 const TOKEN_MAGNITUDES: ReadonlyArray<readonly [number, string]> = [
   [1_000_000_000, "B"],
@@ -111,9 +118,10 @@ Scanner options:
                              redacted set of conversation excerpts
                              (narrativeEvidence). Off by default. Requires
                              --review.
-  --review                   In Buildstory Cloud mode, print exact excerpts;
-                             in local or bring-your-own-key mode, preview
-                             generated prose. Require confirmation.
+  --review                   In Buildstory Cloud mode, print exact excerpts.
+                             In bring-your-own-key mode, review and confirm
+                             exact provider-bound facts/excerpts before send,
+                             then preview generated prose. Local previews prose.
   --require-evidence         Strict mode: exit before upload/write if the
                              evidence bundle would be empty. Requires
                              --with-evidence. Without this flag, an empty
@@ -132,10 +140,11 @@ paths, and secret text are not sent.
 
 Local mode is the default for new connections and calls Ollama on loopback;
 generatedNarrative is uploaded but narrativeEvidence is never uploaded.
-Bring-your-own-key mode calls a cloud model you configure yourself
-(BUILDSTORY_BYOK_API_KEY, BUILDSTORY_BYOK_BASE_URL, BUILDSTORY_BYOK_MODEL) -
-redacted excerpts go only to that provider, never to Buildstory; only the
-resulting generatedNarrative is uploaded, exactly like local mode.
+Bring-your-own-key mode calls OpenRouter or OpenAI with a key you configure in
+the scanner environment. It requires --review and typed confirmation before
+the displayed deterministic facts and exact redacted excerpts are sent. They
+go only to that provider, never to Buildstory; only the resulting standard-
+depth generatedNarrative is uploaded, exactly like local mode.
 Buildstory Cloud mode is explicit and, with --review confirmation, includes
 a bounded set of redacted excerpts sent through Buildstory to Buildstory's
 own narrative provider - there is no model choice on this path. Off mode
@@ -432,7 +441,13 @@ function validateScannerArguments(args: ParsedScannerArguments): void {
   }
 }
 
-type EffectiveNarrative = { mode: "local" | "byok" | "cloud" | "off"; model: string | null };
+type EffectiveNarrative = {
+  mode: "local" | "byok" | "cloud" | "off";
+  provider: NarrativeProvider | null;
+  model: string | null;
+  analysisTier: AnalysisTier;
+  uploadMaxBytes?: number;
+};
 
 const PROGRESS_STAGE_LABELS: Record<ScanProgressEvent["stage"], string> = {
   "inspect-repository": "Inspecting repository",
@@ -499,21 +514,38 @@ async function effectiveNarrative(parsed: ParsedScannerArguments): Promise<Effec
     // uploading excerpts. The mismatch (grant says local/off, flag asks for evidence) is
     // surfaced as NARRATIVE_MODE_CONFLICT by the caller instead of silently resolved here.
     const grant = await getStoredUploadGrant();
-    if (grant?.narrative) return grant.narrative;
+    if (grant?.narrative) return { ...grant.narrative, uploadMaxBytes: grant.maxBytes };
     // A grant written by an old CLI has no mode block. Preserve its historical behavior.
-    return { mode: "cloud", model: null };
+    return {
+      mode: "cloud",
+      provider: "openai",
+      model: null,
+      analysisTier: "standard",
+      ...(grant?.maxBytes !== undefined ? { uploadMaxBytes: grant.maxBytes } : {}),
+    };
   }
   // No stored grant applies outside scan-upload (e.g. `scan` writing a local file, with
   // no dashboard connection to defer to). --with-evidence there has always meant "select
   // cloud evidence for the written snapshot".
-  if (parsed.withEvidence) return { mode: "cloud", model: null };
-  return { mode: "local", model: null };
+  if (parsed.withEvidence) return { mode: "cloud", provider: "openrouter", model: "deepseek/deepseek-v4-flash", analysisTier: "standard" };
+  return { mode: "local", provider: "ollama", model: null, analysisTier: "standard" };
 }
 
 function scanOptions(parsed: ParsedScannerArguments, narrative: EffectiveNarrative, onProgress?: ScanProgressReporter) {
   const local = narrative.mode === "local";
   const byok = narrative.mode === "byok";
   const cloudEvidence = narrative.mode === "cloud" && parsed.withEvidence;
+  const deep = narrative.analysisTier === "deep" && narrative.mode !== "local";
+  const deepEvidenceBytes = Math.max(0, Math.min(DEEP_MAX_TOTAL_EXCERPT_BYTES, (narrative.uploadMaxBytes ?? 1024 * 1024) - 128 * 1024));
+  const deepBudget = deep ? {
+    maxExcerpts: DEEP_MAX_EXCERPTS,
+    maxCharsPerExcerpt: DEEP_MAX_CHARS_PER_EXCERPT,
+    maxTotalChars: DEEP_MAX_TOTAL_EXCERPT_BYTES,
+    maxTotalBytes: deepEvidenceBytes,
+    maxExcerptsPerSession: DEEP_MAX_EXCERPTS_PER_SESSION,
+    maxAssistantDecisionsPerSession: DEEP_MAX_ASSISTANT_DECISIONS_PER_SESSION,
+    policyVersion: "deep-evidence-v2" as const,
+  } : undefined;
   return {
     repositoryPath: parsed.repo,
     ...(parsed.projectName ? { projectName: parsed.projectName } : {}),
@@ -527,25 +559,37 @@ function scanOptions(parsed: ParsedScannerArguments, narrative: EffectiveNarrati
     ...(parsed.until ? { until: parsed.until } : {}),
     utcOffsetMinutes: -new Date().getTimezoneOffset(),
     ...(cloudEvidence
-      ? { narrative: { mode: "cloud" as const, model: null }, narrativeEvidence: {} }
+      ? {
+          narrative: { mode: "cloud" as const, model: null },
+          narrativeEvidence: deepBudget ?? {},
+        }
       // BYOK reports to the scanner core as "local": the resulting
       // generatedNarrative is always mode:"local" in the snapshot (see
       // contract.ts's GeneratedNarrative.mode) - only `provider`, set by
       // whichever narrativeGenerator actually ran below, distinguishes
       // Ollama from a BYOK model.
       : local || byok
-        ? { narrative: { mode: "local" as const, model: narrative.model } }
+        ? { narrative: { mode: "local" as const, model: narrative.model }, ...(byok && deepBudget ? { narrativeEvidenceBudget: deepBudget } : {}) }
         : narrative.mode === "off"
           ? { narrative: { mode: "off" as const, model: narrative.model } }
           : {}),
     ...(local ? { narrativeGenerator: createOllamaNarrativeGenerator(narrative.model) } : {}),
-    ...(byok ? { narrativeGenerator: createByokNarrativeGenerator(narrative.model) } : {}),
+    ...(byok ? {
+      narrativeGenerator: createByokNarrativeGenerator(narrative.model, narrative.provider ?? "openrouter", narrative.analysisTier),
+      ...(parsed.review ? {
+        beforeNarrativeGeneration: async (input: Parameters<NonNullable<import("./scanner.js").ScanOptions["beforeNarrativeGeneration"]>>[0]) => {
+          printByokProviderReview(input, narrative.provider ?? "openrouter", narrative.analysisTier);
+          const confirmed = await confirmProceed("Send exactly the data shown above directly to your configured provider? Buildstory will not receive the excerpts or your API key.");
+          if (!confirmed) throw new ScannerError("CANCELLED", "Not confirmed. No provider request, snapshot write, or upload occurred.", 3);
+        },
+      } : {}),
+    } : {}),
     ...(onProgress ? { onProgress } : {}),
   };
 }
 
 function metricsOnlyOptions(parsed: ParsedScannerArguments, onProgress?: ScanProgressReporter) {
-  return scanOptions(parsed, { mode: "off", model: null }, onProgress);
+  return scanOptions(parsed, { mode: "off", provider: null, model: null, analysisTier: "standard" }, onProgress);
 }
 
 interface ReviewableSnapshot {
@@ -583,6 +627,7 @@ function printEvidenceForReview(snapshot: ReviewableSnapshot): void {
     if (provider) excerptCountByProvider.set(provider, (excerptCountByProvider.get(provider) ?? 0) + 1);
   }
 
+  process.stdout.write("PRIVACY WARNING: pattern redaction cannot identify every personal name, private idea, pasted code fragment, novel secret, or low-entropy credential. Read every excerpt below before releasing it.\n\n");
   process.stdout.write("Providers considered for narrative evidence:\n");
   for (const selection of snapshot.sourceSelection.providers) {
     const excerptCount = excerptCountByProvider.get(selection.provider) ?? 0;
@@ -608,6 +653,31 @@ function printEvidenceForReview(snapshot: ReviewableSnapshot): void {
   process.stdout.write(
     `(${bundle.discarded.candidates} candidate${bundle.discarded.candidates === 1 ? "" : "s"} considered; ${bundle.discarded.rejectedByRedaction} dropped by redaction, ${bundle.discarded.rejectedByBudget} dropped by budget.)\n\n`,
   );
+}
+
+function printByokProviderReview(
+  input: Parameters<NonNullable<import("./scanner.js").ScanOptions["beforeNarrativeGeneration"]>>[0],
+  provider: NarrativeProvider,
+  analysisTier: AnalysisTier,
+): void {
+  const { snapshot, profile, excerpts } = input;
+  const scores = Object.entries(profile.scores)
+    .map(([name, score]) => `${name}=${score.value}/100; raw inputs ${JSON.stringify(score.rawInputs)}; formula ${score.formula}`)
+    .join(" | ");
+  process.stdout.write("BYOK PROVIDER PRIVACY REVIEW\n");
+  process.stdout.write(`Destination: your configured ${provider === "openai" ? "OpenAI" : "OpenRouter"} endpoint. Report depth: ${analysisTier}.\n`);
+  process.stdout.write(`The provider generation requests contain these deterministic facts (${analysisTier === "deep" ? "three" : "two"} component requests; each may make one bounded JSON-repair request):\n`);
+  process.stdout.write(`  Repository label: ${snapshot.repository.displayName}\n`);
+  process.stdout.write(`  Sessions/turns/tool calls: ${snapshot.sessions.length}/${snapshot.usage.totalTurns}/${snapshot.usage.totalToolCalls}\n`);
+  process.stdout.write(`  Commits/insertions/deletions: ${snapshot.git.commits}/${snapshot.git.insertions}/${snapshot.git.deletions}\n`);
+  process.stdout.write(`  Archetype: ${profile.archetype.name}; rationale: ${profile.archetype.rationale.join(" ") || "none"}\n`);
+  process.stdout.write(`  Profile scores: ${scores}\n`);
+  process.stdout.write(`  Work patterns: peak hours ${profile.workPatterns.peakHours.join(", ") || "none"}; preferred days ${profile.workPatterns.preferredDays.join(", ") || "none"}; median/longest session ${profile.workPatterns.medianSessionMinutes}/${profile.workPatterns.longestSessionMinutes} minutes; primary model ${profile.workPatterns.primaryModel ?? "none"}; timezone ${profile.workPatterns.timezoneLabel}.\n`);
+  process.stdout.write("Recognized secrets, emails, paths, URLs, and hosts were redacted first, but names, private ideas, pasted code, novel secrets, and low-entropy credentials may remain. Review every excerpt:\n\n");
+  if (!excerpts.length) process.stdout.write("  No conversation excerpts were selected. The deterministic facts above will still be sent.\n\n");
+  excerpts.forEach((excerpt, index) => {
+    process.stdout.write(`--- excerpt ${index + 1} [${excerpt.role}] ---\n${excerpt.text}\n\n`);
+  });
 }
 
 function printLocalNarrativeForReview(snapshot: ReviewableSnapshot, mode: "local" | "byok"): void {
@@ -720,6 +790,13 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
   }
 
   let activeNarrative = await effectiveNarrative(parsed);
+  if (activeNarrative.mode === "byok" && !parsed.review) {
+    throw new ScannerError(
+      "BYOK_REVIEW_REQUIRED",
+      "Bring-your-own-key mode requires --review so the exact provider-bound facts and redacted excerpts are shown and confirmed before any request.",
+      2,
+    );
+  }
   if (activeNarrative.mode !== "cloud" && parsed.withEvidence) {
     throw new ScannerError(
       "NARRATIVE_MODE_CONFLICT",
@@ -759,15 +836,15 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
         const switchToCloud = await confirmProceed("Switch to Buildstory Cloud mode? This will select and upload redacted excerpts");
         progress = createProgressReporter(parsed.quiet);
         if (switchToCloud) {
-          activeNarrative = { mode: "cloud", model: null };
-          snapshot = await buildProjectSnapshot(scanOptions({ ...parsed, withEvidence: true, review: true }, { mode: "cloud", model: null }, progress.reporter));
+          activeNarrative = { mode: "cloud", provider: "openrouter", model: null, analysisTier: "standard" };
+          snapshot = await buildProjectSnapshot(scanOptions({ ...parsed, withEvidence: true, review: true }, activeNarrative, progress.reporter));
         } else {
-          activeNarrative = { mode: "off", model: null };
+          activeNarrative = { mode: "off", provider: null, model: null, analysisTier: "standard" };
           snapshot = await buildProjectSnapshot(metricsOnlyOptions(parsed, progress.reporter));
         }
       } else {
         progress = createProgressReporter(parsed.quiet);
-        activeNarrative = { mode: "off", model: null };
+        activeNarrative = { mode: "off", provider: null, model: null, analysisTier: "standard" };
         snapshot = await buildProjectSnapshot(metricsOnlyOptions(parsed, progress.reporter));
       }
     }
@@ -788,8 +865,8 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
         ? activeNarrative.mode === "local"
           ? "This will upload the generated local narrative and deterministic metrics. No conversation excerpts will leave this machine."
           : activeNarrative.mode === "byok"
-            ? "This will send redacted excerpts to your configured model provider and upload the resulting narrative and deterministic metrics. No excerpts are sent to Buildstory."
-            : "This will be sent to your configured Buildstory dashboard along with the rest of the snapshot."
+            ? "The provider generation requests have completed. Upload the reviewed generated narrative and deterministic metrics to Buildstory? No conversation excerpts or API key will be uploaded."
+            : "This will send the reviewed redacted excerpts and deterministic facts to Buildstory, which forwards them to DeepSeek V4 Flash through OpenRouter using ZDR-only routing."
         : "This will be included in the written snapshot file.",
     );
     if (!confirmed) {

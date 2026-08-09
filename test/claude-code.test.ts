@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { canonicalJson } from "../src/canonical-json.js";
-import type { ProjectSnapshot } from "../src/contract.js";
+import type { ProjectSnapshot, ReportStoryPackV3 } from "../src/contract.js";
 import { SESSION_PRICING_TABLE_VERSION } from "../src/session-pricing.js";
 import { buildProjectSnapshot } from "../src/scanner.js";
 import { createByokNarrativeGenerator, createOllamaNarrativeGenerator } from "../src/narrative/local.js";
@@ -227,6 +227,50 @@ test("local narrative generation stays content-free at the upload boundary and r
   }
 });
 
+test("the BYOK-compatible consent hook completes before narrative generation receives excerpts", async () => {
+  const fixture = await createLocalFixture();
+  const order: string[] = [];
+  try {
+    const snapshot = await buildProjectSnapshot({
+      repositoryPath: fixture.repository,
+      consent: "local-scan",
+      providers: ["claude-code"],
+      claudeCodeHome: fixture.claudeCodeHome,
+      since: "2026-08-03T00:00:00Z",
+      until: "2026-08-04T00:00:00Z",
+      narrative: { mode: "local", model: "fixture-byok" },
+      beforeNarrativeGeneration: async ({ snapshot: sourceSnapshot, excerpts }) => {
+        order.push("review");
+        assert.equal("generatedNarrative" in sourceSnapshot, false);
+        assert.ok(excerpts.length > 0);
+      },
+      narrativeGenerator: async ({ excerpts }) => {
+        order.push("provider");
+        assert.ok(excerpts.length > 0);
+        return {
+          provider: "openrouter",
+          model: "fixture-byok",
+          sections: {
+            headline: "Reviewed first",
+            narrative: "The provider ran only after consent.",
+            turningPoint: "The boundary became temporal as well as structural.",
+            learnings: ["Review before send."],
+            decisionPatterns: ["Fail closed."],
+            standoutTraits: ["Privacy-aware."],
+            growthEdge: "Keep the review text aligned with the prompt.",
+          },
+          fallbacksUsed: [],
+        };
+      },
+    });
+    assert.deepEqual(order, ["review", "provider"]);
+    assert.equal(snapshot.narrativeEvidence, undefined);
+    assert.equal(snapshot.generatedNarrative?.provider, "openrouter");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test("structured story-pack decisions are bounded when projected into legacy sections", async () => {
   const fixture = await createLocalFixture();
   try {
@@ -246,11 +290,34 @@ test("structured story-pack decisions are bounded when projected into legacy sec
           outcome: "O".repeat(300),
           sourceRefs: storyPack.decisions[0]?.sourceRefs ?? [],
         }));
+        const sourceRef = storyPack.sources[0]?.ref ?? "GIT";
+        const finding = { title: "Deep finding", summary: "A bounded, source-linked finding.", sourceRefs: [sourceRef], confidence: "high" as const };
+        const deepStoryPack: ReportStoryPackV3 = {
+          ...storyPack,
+          version: "3.0.0",
+          analysisTier: "deep",
+          deepAnalysis: {
+            executiveSynthesis: finding,
+            decisionReview: [finding],
+            frictionAndRecovery: [],
+            engineeringPatterns: [],
+            risksAndEvidenceGaps: [],
+            nextBuildActions: [],
+            chapterChanges: [],
+            coverage: {
+              sessionsSeen: sourceSnapshot.sessions.length,
+              excerptsUsed: 0,
+              evidenceBytes: 0,
+              windowStart: sourceSnapshot.timeWindow.start,
+              windowEnd: sourceSnapshot.timeWindow.end,
+            },
+          },
+        };
         return {
           provider: "ollama" as const,
           model: "fixture-local",
-          sections: sectionsFromStoryPack(storyPack),
-          storyPack,
+          sections: sectionsFromStoryPack(deepStoryPack),
+          storyPack: deepStoryPack,
           fallbacksUsed: [],
         };
       },
@@ -260,6 +327,8 @@ test("structured story-pack decisions are bounded when projected into legacy sec
     assert.ok(snapshot.generatedNarrative?.sections.decisionPatterns.every((item) => item.length <= 300));
     assert.equal(snapshot.generatedNarrative?.storyPack?.decisions[0]?.rationale.length, 300);
     assert.equal(snapshot.generatedNarrative?.storyPack?.decisions[0]?.outcome.length, 300);
+    assert.equal(snapshot.generatedNarrative?.version, "3.0.0");
+    assert.equal(snapshot.generatedNarrative?.storyPack?.version, "3.0.0");
   } finally {
     await fixture.cleanup();
   }
@@ -373,12 +442,7 @@ test("the BYOK generator posts only to the configured provider, never leaks the 
     assert.equal(snapshot.narrativeEvidence, undefined);
     assert.equal(snapshot.generatedNarrative?.mode, "local");
     assert.equal(snapshot.generatedNarrative?.model, "fixture-model-1");
-    // provider is the fixed literal "byok", never the configured host: the
-    // final snapshot-wide fail-closed check rejects any string field that
-    // looks like a URL/host/path, so the real hostname can never be a
-    // persisted field value even though it's fine as an ephemeral progress
-    // message. "byok" is still enough to distinguish this from "ollama".
-    assert.equal(snapshot.generatedNarrative?.provider, "byok");
+    assert.equal(snapshot.generatedNarrative?.provider, "openrouter");
     assert.equal(completionCalls, 2);
     assert.equal(requests.length, 2);
     assert.ok(requests.every((request) => request.url === "https://api.example-provider.invalid/v1/chat/completions"));
@@ -390,9 +454,13 @@ test("the BYOK generator posts only to the configured provider, never leaks the 
     const requestBody = JSON.parse(requests[0]?.body ?? "{}") as {
       response_format?: { type?: unknown; json_schema?: { name?: unknown } };
       messages?: Array<{ role: string; content: string }>;
+      provider?: { zdr?: unknown; data_collection?: unknown; require_parameters?: unknown };
+      store?: unknown;
     };
     assert.equal(requestBody.response_format?.type, "json_schema");
     assert.equal(requestBody.response_format?.json_schema?.name, "buildstory_story");
+    assert.deepEqual(requestBody.provider, { zdr: true, data_collection: "deny", require_parameters: true, allow_fallbacks: true });
+    assert.equal(requestBody.store, undefined);
     assert.equal(requests.some((request) => request.body.includes("/Users/")), false);
     assert.doesNotMatch(snapshot.generatedNarrative?.sections.turningPoint ?? "", /app\/api\/route\.ts|secret\.example\.invalid/);
   } finally {
@@ -428,6 +496,39 @@ test("the BYOK generator refuses to run without BUILDSTORY_BYOK_API_KEY configur
   } finally {
     if (originalApiKey === undefined) delete process.env.BUILDSTORY_BYOK_API_KEY;
     else process.env.BUILDSTORY_BYOK_API_KEY = originalApiKey;
+    await fixture.cleanup();
+  }
+});
+
+test("the OpenAI BYOK preset uses its provider-specific key and store false without OpenRouter routing fields", async () => {
+  const fixture = await createLocalFixture();
+  const originalFetch = globalThis.fetch;
+  const originalKey = process.env.BUILDSTORY_OPENAI_API_KEY;
+  const originalLegacyKey = process.env.BUILDSTORY_BYOK_API_KEY;
+  process.env.BUILDSTORY_OPENAI_API_KEY = "sk-openai-fixture-key";
+  delete process.env.BUILDSTORY_BYOK_API_KEY;
+  const requests: Array<{ url: string; body: Record<string, unknown>; authorization: string | null }> = [];
+  globalThis.fetch = (async (input, init) => {
+    requests.push({ url: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>, authorization: (init?.headers as Record<string, string>)?.authorization ?? null });
+    const value = requests.length === 1
+      ? { headline: "OpenAI BYOK", narrative: "Generated locally through the user's key.", turningPoint: "Review completed.", learnings: ["Keep keys local."] }
+      : { decisionPatterns: ["Review before shipping."], standoutTraits: ["Protects privacy."], growthEdge: "Collect more evidence." };
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(value) } }] }), { status: 200 });
+  }) as typeof fetch;
+  try {
+    const snapshot = await buildProjectSnapshot({
+      repositoryPath: fixture.repository, consent: "local-scan", providers: ["claude-code"], claudeCodeHome: fixture.claudeCodeHome,
+      since: "2026-08-03T00:00:00Z", until: "2026-08-04T00:00:00Z", narrative: { mode: "local" },
+      narrativeGenerator: createByokNarrativeGenerator("gpt-5.6-luna", "openai", "standard"),
+    });
+    assert.equal(snapshot.generatedNarrative?.provider, "openai");
+    assert.ok(requests.every((request) => request.url === "https://api.openai.com/v1/chat/completions"));
+    assert.ok(requests.every((request) => request.authorization === "Bearer sk-openai-fixture-key"));
+    assert.ok(requests.every((request) => request.body.store === false && request.body.provider === undefined));
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalKey === undefined) delete process.env.BUILDSTORY_OPENAI_API_KEY; else process.env.BUILDSTORY_OPENAI_API_KEY = originalKey;
+    if (originalLegacyKey === undefined) delete process.env.BUILDSTORY_BYOK_API_KEY; else process.env.BUILDSTORY_BYOK_API_KEY = originalLegacyKey;
     await fixture.cleanup();
   }
 });
