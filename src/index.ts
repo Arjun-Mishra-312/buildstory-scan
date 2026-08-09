@@ -11,6 +11,6 @@ export { validateProjectSnapshot, getProjectSnapshotSchema } from "./validation.
 export { CodexSessionAdapter } from "./sources/codex.js";
 export type { SessionProviderAdapter } from "./sources/types.js";
 export { computeBuilderProfile, defaultProfileNarrative, PROFILE_DIMENSIONS } from "./insights/profile.js";
-export { createOllamaNarrativeGenerator, LocalNarrativeGenerationError } from "./narrative/local.js";
+export { createByokNarrativeGenerator, createOllamaNarrativeGenerator, LocalNarrativeGenerationError } from "./narrative/local.js";
 export { buildStoryPackSources, createDefaultStoryPack, sanitizeStoryPack, sectionsFromStoryPack } from "./narrative/story-pack.js";
 export type { BuilderProfile, ProfileNarrativeSections } from "./insights/profile.js";

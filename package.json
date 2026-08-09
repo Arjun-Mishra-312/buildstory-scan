@@ -1,8 +1,8 @@
 {
   "name": "buildstory-scan",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "BuildStory read-only local scanner for privacy-preserving AI-assisted project snapshots.",
-  "keywords": ["buildstory", "cli", "privacy", "ai-assisted-development", "read-only", "codex", "claude-code"],
+  "keywords": ["buildstory", "cli", "privacy", "ai-assisted-development", "read-only", "codex", "claude-code", "cursor", "antigravity"],
   "homepage": "https://buildstory.dev",
   "repository": {
     "type": "git",

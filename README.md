@@ -1,6 +1,6 @@
 # BuildStory Scanner
 
-BuildStory Scanner is a TypeScript/Node.js CLI for a desktop-first community of AI-assisted software builders. It inspects one user-selected Git worktree read-only, discovers repository-scoped Codex sessions, discards content-bearing fields locally, and emits a deterministic `ProjectSnapshot 1.0.0`.
+BuildStory Scanner is a TypeScript/Node.js CLI for a desktop-first community of AI-assisted software builders. It inspects one user-selected Git worktree read-only, discovers repository-scoped AI coding-session data from Codex, Claude Code, Cursor, and Google Antigravity, discards content-bearing fields locally, and emits a deterministic `ProjectSnapshot 1.7.0`.
 
 The CLI provides a real end-to-end transport to a BuildStory web app: a separately running **local** app by default, or a single explicitly pinned **HTTPS remote host** per connection (`--remote`, or `--api-base-url`/`--allow-host` for a non-default host). No unpinned or discovered remote endpoint is accepted.
 
@@ -135,10 +135,10 @@ See [`docs/connect-protocol.md`](docs/connect-protocol.md) and [`docs/upload-lif
 
 ## Local-only inspect and scan
 
-These commands never use a non-loopback network destination. `inspect` is fully
-offline; `scan` may call Ollama on loopback for local-first narrative prose and
-never sends excerpts to a non-loopback model unless cloud mode is explicitly
-selected through a connected dashboard:
+These commands never use a non-loopback network destination on their own. `inspect` is fully
+offline; `scan` may call Ollama on loopback for local-first narrative prose and never sends
+excerpts to a non-loopback model unless bring-your-own-key or cloud mode is explicitly
+selected through a connected dashboard (see "Narrative modes" below):
 
 ```powershell
 buildstory-scan inspect --repo 'C:\path\to\repository'
@@ -152,6 +152,17 @@ buildstory-scan scan --repo 'C:\path\to\repository' --consent local-scan --outpu
 - `--output` atomically writes a mode-0600 file where supported. Its parent must exist outside the selected repository; replacing a file requires `--overwrite`.
 
 Without an explicit end, the deterministic window uses the latest matched-session or HEAD-commit timestamp, then the Unix epoch. Without a start, it defaults to full observed history, starting at the earliest session. Identical inputs and options produce identical canonical bytes and scan IDs.
+
+## Narrative modes
+
+The connected dashboard chooses one of four narrative modes; the CLI reads it from the stored connection grant, and `--with-evidence`/`--require-evidence` can never override a `local`, `byok`, or `off` connection into uploading excerpts (a mismatch is refused with `NARRATIVE_MODE_CONFLICT`, not silently resolved).
+
+- **Local** (the default): calls Ollama on loopback. Set `BUILDSTORY_OLLAMA_BASE_URL` to override the default `http://127.0.0.1:11434`.
+- **Bring your own key (BYOK)**: calls an OpenAI-compatible cloud model you configure yourself, using `BUILDSTORY_BYOK_API_KEY` (required), `BUILDSTORY_BYOK_BASE_URL` (defaults to `https://api.openai.com/v1`), and optionally `BUILDSTORY_BYOK_MODEL`. Read only from the environment, never a CLI flag - a flag would land in shell history and process listings. Excerpts go from this machine directly to that provider, under that provider's own terms; Buildstory never sees them or the key. The resulting `generatedNarrative` reports `provider: "byok"` rather than the provider's hostname, since the uploaded snapshot's own fail-closed check rejects any field that looks like a URL or host.
+- **Cloud**: requires `--with-evidence --review`; excerpts are uploaded to the connected Buildstory dashboard after you review and confirm them.
+- **Off**: no narrative generation; only deterministic metrics and profile scores.
+
+Local and BYOK both upload only `generatedNarrative` (never `narrativeEvidence`) and share the identical redaction/sanitization pipeline - only the HTTP destination for the model call differs.
 
 ## Contract and privacy boundary
 

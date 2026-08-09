@@ -11,7 +11,7 @@ import { PROJECT_SNAPSHOT_SCHEMA_VERSION, SCANNER_VERSION } from "./contract.js"
 import { getStoredUploadGrant } from "./connection-state.js";
 import { ScannerError, safeErrorMessage } from "./errors.js";
 import { readLocalDashboardStatus, uploadProjectSnapshot } from "./local-upload.js";
-import { createOllamaNarrativeGenerator, LocalNarrativeGenerationError } from "./narrative/local.js";
+import { createByokNarrativeGenerator, createOllamaNarrativeGenerator, LocalNarrativeGenerationError } from "./narrative/local.js";
 import { writeSnapshotFile } from "./output.js";
 import { Redactor } from "./redaction.js";
 import { inspectRepository } from "./repository.js";
@@ -110,8 +110,9 @@ Scanner options:
   --with-evidence            In cloud mode, opt in to a small, redacted set of
                              conversation excerpts (narrativeEvidence). Off by
                              default. Requires --review.
-  --review                   In cloud mode, print exact excerpts; in local
-                             mode, preview generated prose. Require confirmation.
+  --review                   In cloud mode, print exact excerpts; in local or
+                             bring-your-own-key mode, preview generated prose.
+                             Require confirmation.
   --require-evidence         Strict mode: exit before upload/write if the
                              evidence bundle would be empty. Requires
                              --with-evidence. Without this flag, an empty
@@ -129,9 +130,14 @@ source/file bodies, diffs, transcript bodies, tool arguments/results, file
 paths, and secret text are not sent.
 
 Local mode is the default for new connections and calls Ollama on loopback;
-generatedNarrative is uploaded but narrativeEvidence is never uploaded. Cloud
+generatedNarrative is uploaded but narrativeEvidence is never uploaded.
+Bring-your-own-key mode calls a cloud model you configure yourself
+(BUILDSTORY_BYOK_API_KEY, BUILDSTORY_BYOK_BASE_URL, BUILDSTORY_BYOK_MODEL) -
+redacted excerpts go only to that provider, never to Buildstory; only the
+resulting generatedNarrative is uploaded, exactly like local mode. Cloud
 mode is explicit and, with --review confirmation, includes a bounded set of
-redacted excerpts. Off mode uploads deterministic metrics/profile facts only.
+redacted excerpts sent through Buildstory. Off mode uploads deterministic
+metrics/profile facts only.
 `;
 
 interface ParsedScannerArguments {
@@ -424,7 +430,7 @@ function validateScannerArguments(args: ParsedScannerArguments): void {
   }
 }
 
-type EffectiveNarrative = { mode: "local" | "cloud" | "off"; model: string | null };
+type EffectiveNarrative = { mode: "local" | "byok" | "cloud" | "off"; model: string | null };
 
 const PROGRESS_STAGE_LABELS: Record<ScanProgressEvent["stage"], string> = {
   "inspect-repository": "Inspecting repository",
@@ -484,18 +490,27 @@ function createProgressReporter(quiet: boolean): { reporter: ScanProgressReporte
 }
 
 async function effectiveNarrative(parsed: ParsedScannerArguments): Promise<EffectiveNarrative> {
-  if (parsed.withEvidence) return { mode: "cloud", model: null };
   if (parsed.command === "scan-upload") {
+    // The dashboard-chosen mode on the stored grant is authoritative here, even when
+    // --with-evidence is present: --with-evidence only ever *selects* cloud evidence
+    // within cloud mode, it must never be able to override a local/off connection into
+    // uploading excerpts. The mismatch (grant says local/off, flag asks for evidence) is
+    // surfaced as NARRATIVE_MODE_CONFLICT by the caller instead of silently resolved here.
     const grant = await getStoredUploadGrant();
     if (grant?.narrative) return grant.narrative;
     // A grant written by an old CLI has no mode block. Preserve its historical behavior.
     return { mode: "cloud", model: null };
   }
+  // No stored grant applies outside scan-upload (e.g. `scan` writing a local file, with
+  // no dashboard connection to defer to). --with-evidence there has always meant "select
+  // cloud evidence for the written snapshot".
+  if (parsed.withEvidence) return { mode: "cloud", model: null };
   return { mode: "local", model: null };
 }
 
 function scanOptions(parsed: ParsedScannerArguments, narrative: EffectiveNarrative, onProgress?: ScanProgressReporter) {
   const local = narrative.mode === "local";
+  const byok = narrative.mode === "byok";
   const cloudEvidence = narrative.mode === "cloud" && parsed.withEvidence;
   return {
     repositoryPath: parsed.repo,
@@ -511,10 +526,18 @@ function scanOptions(parsed: ParsedScannerArguments, narrative: EffectiveNarrati
     utcOffsetMinutes: -new Date().getTimezoneOffset(),
     ...(cloudEvidence
       ? { narrative: { mode: "cloud" as const, model: null }, narrativeEvidence: {} }
-      : narrative.mode === "local" || narrative.mode === "off"
-        ? { narrative: { mode: narrative.mode, model: narrative.model } }
-        : {}),
+      // BYOK reports to the scanner core as "local": the resulting
+      // generatedNarrative is always mode:"local" in the snapshot (see
+      // contract.ts's GeneratedNarrative.mode) - only `provider`, set by
+      // whichever narrativeGenerator actually ran below, distinguishes
+      // Ollama from a BYOK model.
+      : local || byok
+        ? { narrative: { mode: "local" as const, model: narrative.model } }
+        : narrative.mode === "off"
+          ? { narrative: { mode: "off" as const, model: narrative.model } }
+          : {}),
     ...(local ? { narrativeGenerator: createOllamaNarrativeGenerator(narrative.model) } : {}),
+    ...(byok ? { narrativeGenerator: createByokNarrativeGenerator(narrative.model) } : {}),
     ...(onProgress ? { onProgress } : {}),
   };
 }
@@ -585,13 +608,16 @@ function printEvidenceForReview(snapshot: ReviewableSnapshot): void {
   );
 }
 
-function printLocalNarrativeForReview(snapshot: ReviewableSnapshot): void {
+function printLocalNarrativeForReview(snapshot: ReviewableSnapshot, mode: "local" | "byok"): void {
   const narrative = snapshot.generatedNarrative;
   if (!narrative) {
-    process.stdout.write("Local narrative generation produced no prose; only the deterministic metrics will be uploaded.\n\n");
+    process.stdout.write("Narrative generation produced no prose; only the deterministic metrics will be uploaded.\n\n");
     return;
   }
-  process.stdout.write(`Local narrative generated by ${narrative.provider} (${narrative.model}). No excerpts will be uploaded in local mode.\n\n`);
+  const uploadNote = mode === "byok"
+    ? "Excerpts were sent only to your configured provider; they are never uploaded to Buildstory."
+    : "No excerpts will be uploaded in local mode.";
+  process.stdout.write(`Narrative generated by ${narrative.provider} (${narrative.model}). ${uploadNote}\n\n`);
   process.stdout.write(`HEADLINE\n${narrative.sections.headline}\n\nNARRATIVE\n${narrative.sections.narrative}\n\nTURNING POINT\n${narrative.sections.turningPoint}\n\n`);
   process.stdout.write(`LEARNINGS\n${narrative.sections.learnings.map((item) => `- ${item}`).join("\n")}\n\n`);
   process.stdout.write(`DECISION PATTERNS\n${narrative.sections.decisionPatterns.map((item) => `- ${item}`).join("\n")}\n\n`);
@@ -692,11 +718,27 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
   }
 
   let activeNarrative = await effectiveNarrative(parsed);
-  if (activeNarrative.mode === "local" && parsed.withEvidence) {
-    throw new ScannerError("NARRATIVE_MODE_CONFLICT", "This connection is in local mode. Local generation never uploads excerpts; choose cloud mode in the dashboard before using --with-evidence.", 2);
+  if (activeNarrative.mode !== "cloud" && parsed.withEvidence) {
+    throw new ScannerError(
+      "NARRATIVE_MODE_CONFLICT",
+      activeNarrative.mode === "local"
+        ? "This connection is in local mode. Local generation never uploads excerpts; choose cloud mode in the dashboard before using --with-evidence."
+        : activeNarrative.mode === "byok"
+          ? "This connection is in bring-your-own-key mode. BYOK generation sends excerpts only to your configured provider and never uploads them to Buildstory; choose cloud mode in the dashboard before using --with-evidence."
+          : "This connection is in off mode. Off mode never uploads excerpts; choose cloud mode in the dashboard before using --with-evidence.",
+      2,
+    );
   }
-  if (activeNarrative.mode === "local" && parsed.requireEvidence) {
-    throw new ScannerError("REQUIRE_EVIDENCE_WITH_LOCAL", "--require-evidence applies only to cloud excerpt mode; local mode generates prose on this machine.", 2);
+  if (activeNarrative.mode !== "cloud" && parsed.requireEvidence) {
+    throw new ScannerError(
+      "REQUIRE_EVIDENCE_WITH_LOCAL",
+      activeNarrative.mode === "local"
+        ? "--require-evidence applies only to cloud excerpt mode; local mode generates prose on this machine."
+        : activeNarrative.mode === "byok"
+          ? "--require-evidence applies only to cloud excerpt mode; bring-your-own-key mode generates prose via your configured provider."
+          : "--require-evidence applies only to cloud excerpt mode; off mode uploads deterministic metrics only.",
+      2,
+    );
   }
 
   let progress = createProgressReporter(parsed.quiet);
@@ -705,12 +747,13 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
     try {
       snapshot = await buildProjectSnapshot(scanOptions(parsed, activeNarrative, progress.reporter));
     } catch (error) {
-      if (!(activeNarrative.mode === "local" && error instanceof LocalNarrativeGenerationError)) throw error;
+      const generatedOnThisMachine = activeNarrative.mode === "local" || activeNarrative.mode === "byok";
+      if (!(generatedOnThisMachine && error instanceof LocalNarrativeGenerationError)) throw error;
       progress.reporter({ stage: "failed", state: "failed", message: error.message });
       progress.stop();
       const canPrompt = Boolean(process.stdin.isTTY) && !parsed.quiet;
       if (canPrompt) {
-        process.stdout.write(`Local narrative generation failed: ${error.message}\n`);
+        process.stdout.write(`Narrative generation failed: ${error.message}\n`);
         const switchToCloud = await confirmProceed("Switch to cloud mode? This will select and upload redacted excerpts");
         progress = createProgressReporter(parsed.quiet);
         if (switchToCloud) {
@@ -733,13 +776,18 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
     return 4;
   }
   if (parsed.review) {
-    if (activeNarrative.mode === "local" && snapshot.generatedNarrative) printLocalNarrativeForReview(snapshot);
-    else printEvidenceForReview(snapshot);
+    if ((activeNarrative.mode === "local" || activeNarrative.mode === "byok") && snapshot.generatedNarrative) {
+      printLocalNarrativeForReview(snapshot, activeNarrative.mode);
+    } else {
+      printEvidenceForReview(snapshot);
+    }
     const confirmed = await confirmProceed(
       parsed.command === "scan-upload"
         ? activeNarrative.mode === "local"
           ? "This will upload the generated local narrative and deterministic metrics. No conversation excerpts will leave this machine."
-          : "This will be sent to your configured Buildstory dashboard along with the rest of the snapshot."
+          : activeNarrative.mode === "byok"
+            ? "This will send redacted excerpts to your configured model provider and upload the resulting narrative and deterministic metrics. No excerpts are sent to Buildstory."
+            : "This will be sent to your configured Buildstory dashboard along with the rest of the snapshot."
         : "This will be included in the written snapshot file.",
     );
     if (!confirmed) {

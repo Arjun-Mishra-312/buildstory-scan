@@ -7,7 +7,7 @@ import { canonicalJson } from "../src/canonical-json.js";
 import type { ProjectSnapshot } from "../src/contract.js";
 import { SESSION_PRICING_TABLE_VERSION } from "../src/session-pricing.js";
 import { buildProjectSnapshot } from "../src/scanner.js";
-import { createOllamaNarrativeGenerator } from "../src/narrative/local.js";
+import { createByokNarrativeGenerator, createOllamaNarrativeGenerator } from "../src/narrative/local.js";
 import { createDefaultStoryPack, sectionsFromStoryPack } from "../src/narrative/story-pack.js";
 import { validateProjectSnapshot } from "../src/validation.js";
 import { createLocalFixture, encodedClaudeCodeProjectDirectory } from "./helpers.js";
@@ -324,6 +324,110 @@ test("the Ollama generator uses only loopback HTTP and splits narrative/profile 
     globalThis.fetch = originalFetch;
     if (originalBaseUrl === undefined) delete process.env.BUILDSTORY_OLLAMA_BASE_URL;
     else process.env.BUILDSTORY_OLLAMA_BASE_URL = originalBaseUrl;
+    await fixture.cleanup();
+  }
+});
+
+test("the BYOK generator posts only to the configured provider, never leaks the key, and redacts identically to Ollama", async () => {
+  const fixture = await createLocalFixture();
+  const originalFetch = globalThis.fetch;
+  const originalApiKey = process.env.BUILDSTORY_BYOK_API_KEY;
+  const originalBaseUrl = process.env.BUILDSTORY_BYOK_BASE_URL;
+  const originalModel = process.env.BUILDSTORY_BYOK_MODEL;
+  const requests: Array<{ url: string; body: string; authorization: string | null }> = [];
+  process.env.BUILDSTORY_BYOK_API_KEY = "sk-fixture-secret-do-not-leak-001";
+  process.env.BUILDSTORY_BYOK_BASE_URL = "https://api.example-provider.invalid/v1";
+  process.env.BUILDSTORY_BYOK_MODEL = "fixture-model-1";
+  let completionCalls = 0;
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    const body = typeof init?.body === "string" ? init.body : "";
+    const headers = init?.headers as Record<string, string> | undefined;
+    requests.push({ url, body, authorization: headers?.authorization ?? null });
+    completionCalls += 1;
+    const response = completionCalls === 1
+      ? {
+          headline: "BYOK story",
+          narrative: "A byok narrative.",
+          turningPoint: "The model mentioned app/api/route.ts and https://secret.example.invalid.",
+          learnings: ["Keep excerpts scoped to the chosen provider."],
+        }
+      : {
+          decisionPatterns: ["Review before shipping."],
+          standoutTraits: ["Keeps the feedback loop tight."],
+          growthEdge: "Validate the weak product-instinct proxy with more evidence.",
+        };
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(response) } }] }), { status: 200 });
+  }) as typeof fetch;
+  try {
+    const snapshot = await buildProjectSnapshot({
+      repositoryPath: fixture.repository,
+      consent: "local-scan",
+      providers: ["claude-code"],
+      claudeCodeHome: fixture.claudeCodeHome,
+      since: "2026-08-03T00:00:00Z",
+      until: "2026-08-04T00:00:00Z",
+      narrative: { mode: "local" },
+      narrativeGenerator: createByokNarrativeGenerator(),
+    });
+    assert.equal(snapshot.narrativeEvidence, undefined);
+    assert.equal(snapshot.generatedNarrative?.mode, "local");
+    assert.equal(snapshot.generatedNarrative?.model, "fixture-model-1");
+    // provider is the fixed literal "byok", never the configured host: the
+    // final snapshot-wide fail-closed check rejects any string field that
+    // looks like a URL/host/path, so the real hostname can never be a
+    // persisted field value even though it's fine as an ephemeral progress
+    // message. "byok" is still enough to distinguish this from "ollama".
+    assert.equal(snapshot.generatedNarrative?.provider, "byok");
+    assert.equal(completionCalls, 2);
+    assert.equal(requests.length, 2);
+    assert.ok(requests.every((request) => request.url === "https://api.example-provider.invalid/v1/chat/completions"));
+    assert.ok(requests.every((request) => request.authorization === "Bearer sk-fixture-secret-do-not-leak-001"));
+    // The key must appear only in the Authorization header, never in the body,
+    // and the request/response bodies (which do reach the third-party
+    // provider) must never contain the API key value.
+    assert.equal(requests.every((request) => !request.body.includes("sk-fixture-secret-do-not-leak-001")), true);
+    const requestBody = JSON.parse(requests[0]?.body ?? "{}") as {
+      response_format?: { type?: unknown; json_schema?: { name?: unknown } };
+      messages?: Array<{ role: string; content: string }>;
+    };
+    assert.equal(requestBody.response_format?.type, "json_schema");
+    assert.equal(requestBody.response_format?.json_schema?.name, "buildstory_story");
+    assert.equal(requests.some((request) => request.body.includes("/Users/")), false);
+    assert.doesNotMatch(snapshot.generatedNarrative?.sections.turningPoint ?? "", /app\/api\/route\.ts|secret\.example\.invalid/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalApiKey === undefined) delete process.env.BUILDSTORY_BYOK_API_KEY;
+    else process.env.BUILDSTORY_BYOK_API_KEY = originalApiKey;
+    if (originalBaseUrl === undefined) delete process.env.BUILDSTORY_BYOK_BASE_URL;
+    else process.env.BUILDSTORY_BYOK_BASE_URL = originalBaseUrl;
+    if (originalModel === undefined) delete process.env.BUILDSTORY_BYOK_MODEL;
+    else process.env.BUILDSTORY_BYOK_MODEL = originalModel;
+    await fixture.cleanup();
+  }
+});
+
+test("the BYOK generator refuses to run without BUILDSTORY_BYOK_API_KEY configured", async () => {
+  const fixture = await createLocalFixture();
+  const originalApiKey = process.env.BUILDSTORY_BYOK_API_KEY;
+  delete process.env.BUILDSTORY_BYOK_API_KEY;
+  try {
+    await assert.rejects(
+      buildProjectSnapshot({
+        repositoryPath: fixture.repository,
+        consent: "local-scan",
+        providers: ["claude-code"],
+        claudeCodeHome: fixture.claudeCodeHome,
+        since: "2026-08-03T00:00:00Z",
+        until: "2026-08-04T00:00:00Z",
+        narrative: { mode: "local" },
+        narrativeGenerator: createByokNarrativeGenerator(),
+      }),
+      /BUILDSTORY_BYOK_API_KEY/,
+    );
+  } finally {
+    if (originalApiKey === undefined) delete process.env.BUILDSTORY_BYOK_API_KEY;
+    else process.env.BUILDSTORY_BYOK_API_KEY = originalApiKey;
     await fixture.cleanup();
   }
 });

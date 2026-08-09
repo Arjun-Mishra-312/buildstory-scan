@@ -2,7 +2,7 @@
 
 export const PROJECT_SNAPSHOT_SCHEMA_VERSION = "1.7.0" as const;
 export const SCANNER_NAME = "buildstory" as const;
-export const SCANNER_VERSION = "0.8.0" as const;
+export const SCANNER_VERSION = "0.9.0" as const;
 export const CONSENT_STATEMENT_VERSION = "1.0" as const;
 /** Separate, additional consent for the opt-in narrativeEvidence bundle only. */
 export const NARRATIVE_EVIDENCE_CONSENT_VERSION = "1.0" as const;
@@ -10,7 +10,16 @@ export const NARRATIVE_EVIDENCE_BUNDLE_VERSION = "1.0.0" as const;
 
 export type IsoDateTime = string;
 export type Sha256Digest = `sha256:${string}`;
-export type NarrativeMode = "local" | "cloud" | "off";
+/**
+ * Connection-level mode, chosen on the dashboard and carried by the stored
+ * upload grant. "byok" is a locally-generated mode like "local" - the model
+ * call goes to a cloud provider the creator configured with their own key,
+ * but the key and the resulting excerpts never reach Buildstory, only the
+ * redacted prose does. It is distinct from GeneratedNarrative.mode below,
+ * which stays "local" for both "local" and "byok" scans - only `provider`
+ * distinguishes Ollama from a BYOK model in the uploaded snapshot.
+ */
+export type NarrativeMode = "local" | "byok" | "cloud" | "off";
 
 /**
  * Every AI coding-session source this scanner can read. gemini-antigravity

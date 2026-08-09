@@ -294,6 +294,98 @@ test("CLI completes connect, validated one-PUT upload, and authenticated status 
   }
 });
 
+test("CLI refuses --with-evidence on a local-mode connection and uploads nothing", async () => {
+  const fixture = await createLocalFixture();
+  const stateDirectory = path.join(fixture.root, "local-mode-state");
+  const bearerToken = "fixture-local-mode-bearer-token-003";
+  let uploadCount = 0;
+
+  const server = createServer((request, response) => {
+    const chunks: Buffer[] = [];
+    request.on("data", (chunk: Buffer) => chunks.push(chunk));
+    request.on("end", () => {
+      const body = Buffer.concat(chunks).toString("utf8");
+      if (request.method === "POST" && request.url === "/api/v1/cli/connect") {
+        const connectionRequest = JSON.parse(body) as Record<string, unknown>;
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({
+          protocolVersion: "1.0",
+          status: "connected",
+          uploadSessionId: connectionRequest.uploadSessionId,
+          connectionId: "local-connection-003",
+          uploadGrant: {
+            bearerToken,
+            snapshotEndpoint: "/api/v1/cli/snapshots/fixture-003",
+            expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
+            schemaVersion: PROJECT_SNAPSHOT_SCHEMA_VERSION,
+            maxBytes: 1024 * 1024,
+          },
+          // The dashboard session is pinned to local mode - this is the setting
+          // --with-evidence must not be able to override into a cloud upload.
+          narrative: { mode: "local", model: null },
+        }));
+        return;
+      }
+      if (request.method === "PUT" && request.url === "/api/v1/cli/snapshots/fixture-003") {
+        uploadCount += 1;
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({
+          protocolVersion: "1.0",
+          status: "accepted",
+          receipt: {
+            receiptId: "receipt-fixture-003",
+            scanId: "should-not-be-reached",
+            snapshotDigest: request.headers["x-buildstory-snapshot-digest"],
+            acceptedAt: new Date().toISOString(),
+          },
+          statusUrl: "/api/v1/cli/status/fixture-003",
+          reportUrl: "/api/v1/cli/reports/fixture-003",
+        }));
+        return;
+      }
+      response.writeHead(404).end();
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => resolve());
+  });
+
+  try {
+    const address = server.address() as AddressInfo;
+    const baseUrl = `http://127.0.0.1:${address.port}/`;
+    const environment = { BUILDSTORY_STATE_DIR: stateDirectory };
+    const connect = await runProcess([
+      "connect", "session-demo-003",
+      "--code", "DEVICE-CODE-003",
+      "--api-base-url", baseUrl,
+    ], environment);
+    assert.equal(connect.exitCode, 0, connect.stderr);
+
+    const upload = await runProcess([
+      "scan-upload",
+      "--repo", fixture.repository,
+      "--source", "codex",
+      "--codex-home", fixture.codexHome,
+      "--consent", "local-scan",
+      "--upload-consent", "local-dashboard",
+      "--since", "2026-08-03T00:00:00Z",
+      "--until", "2026-08-04T00:00:00Z",
+      "--with-evidence",
+      "--review",
+    ], environment);
+    assert.notEqual(upload.exitCode, 0);
+    assert.match(upload.stderr, /NARRATIVE_MODE_CONFLICT/);
+    assert.match(upload.stderr, /local mode/i);
+    // The refusal happens before any network call in the upload path (unlike the
+    // grant-consuming PUT itself), so nothing reached the server.
+    assert.equal(uploadCount, 0);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    await fixture.cleanup();
+  }
+});
+
 test("CLI requires local-scan consent before discovery", async () => {
   const fixture = await createLocalFixture();
   try {

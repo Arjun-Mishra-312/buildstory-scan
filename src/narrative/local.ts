@@ -21,7 +21,13 @@ export type LocalNarrativeInput = {
 };
 
 export type LocalNarrativeGenerator = (input: LocalNarrativeInput) => Promise<{
-  provider: "ollama";
+  /**
+   * Free-form: "ollama" for local Ollama generation, or the real provider
+   * name (e.g. "openai") for a bring-your-own-key generation. Either way the
+   * ProjectSnapshot's generatedNarrative.mode stays the literal "local" -
+   * only this field distinguishes who actually wrote the prose.
+   */
+  provider: string;
   model: string;
   sections: GeneratedNarrativeSections;
   storyPack?: ReportStoryPackV2;
@@ -29,7 +35,10 @@ export type LocalNarrativeGenerator = (input: LocalNarrativeInput) => Promise<{
 }>;
 
 export class LocalNarrativeGenerationError extends Error {
-  constructor(public code: "ollama_unavailable" | "ollama_timeout" | "ollama_request_failed" | "ollama_invalid_response", message: string) {
+  constructor(
+    public code: "local_provider_unavailable" | "local_provider_timeout" | "local_provider_request_failed" | "local_provider_invalid_response",
+    message: string,
+  ) {
     super(message);
     this.name = "LocalNarrativeGenerationError";
   }
@@ -52,14 +61,46 @@ function localBaseUrl(raw = process.env.BUILDSTORY_OLLAMA_BASE_URL?.trim() || DE
   try {
     url = new URL(raw);
   } catch {
-    throw new LocalNarrativeGenerationError("ollama_unavailable", "BUILDSTORY_OLLAMA_BASE_URL is not a valid URL.");
+    throw new LocalNarrativeGenerationError("local_provider_unavailable", "BUILDSTORY_OLLAMA_BASE_URL is not a valid URL.");
   }
   const host = url.hostname.toLocaleLowerCase("en-US");
   const loopback = host === "localhost" || host === "::1" || /^127(?:\.\d{1,3}){3}$/.test(host);
   if (!loopback || !["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
-    throw new LocalNarrativeGenerationError("ollama_unavailable", "Ollama must be reachable through a credential-free loopback URL.");
+    throw new LocalNarrativeGenerationError("local_provider_unavailable", "Ollama must be reachable through a credential-free loopback URL.");
   }
   return url;
+}
+
+/**
+ * BYOK config is read from the environment only, never a CLI flag: an
+ * `--api-key` flag would land in shell history and process listings, the
+ * exact exposure the connect protocol's `--code` handling already documents
+ * and works to minimize (see docs/privacy.md). The base URL is deliberately
+ * NOT restricted to loopback - a BYOK provider is expected to be a real
+ * cloud endpoint the creator configured themselves - but it must still be a
+ * credential-free HTTPS URL, matching the same rule the web app applies to
+ * BUILDSTORY_LLM_BASE_URL for the subsidized cloud path.
+ */
+function byokConfig(): { baseUrl: string; apiKey: string; model: string | null } {
+  const apiKey = process.env.BUILDSTORY_BYOK_API_KEY?.trim();
+  if (!apiKey) {
+    throw new LocalNarrativeGenerationError(
+      "local_provider_unavailable",
+      "Bring-your-own-key mode requires BUILDSTORY_BYOK_API_KEY. Set it, BUILDSTORY_BYOK_BASE_URL, and optionally BUILDSTORY_BYOK_MODEL before scanning.",
+    );
+  }
+  const rawBaseUrl = process.env.BUILDSTORY_BYOK_BASE_URL?.trim() || "https://api.openai.com/v1";
+  let parsed: URL;
+  try {
+    parsed = new URL(rawBaseUrl);
+  } catch {
+    throw new LocalNarrativeGenerationError("local_provider_unavailable", "BUILDSTORY_BYOK_BASE_URL is not a valid URL.");
+  }
+  if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.search || parsed.hash) {
+    throw new LocalNarrativeGenerationError("local_provider_unavailable", "BUILDSTORY_BYOK_BASE_URL must be a credential-free HTTPS URL.");
+  }
+  const model = process.env.BUILDSTORY_BYOK_MODEL?.trim() || null;
+  return { baseUrl: parsed.href.replace(/\/$/, ""), apiKey, model };
 }
 
 function extractJson(content: string): unknown {
@@ -110,15 +151,15 @@ function boundedEnvironmentInteger(name: string, fallback: number, minimum: numb
   return Math.min(Math.max(Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : fallback, minimum), maximum);
 }
 
-function timeoutMessage(operation: string, timeoutMs: number): string {
+function timeoutMessage(providerLabel: string, operation: string, timeoutMs: number): string {
   const seconds = Math.round(timeoutMs / 1_000);
-  return `Ollama timed out after ${seconds} second${seconds === 1 ? "" : "s"} while ${operation}.`;
+  return `${providerLabel} timed out after ${seconds} second${seconds === 1 ? "" : "s"} while ${operation}.`;
 }
 
 function componentFallbackReason(error: unknown): string {
   if (!(error instanceof LocalNarrativeGenerationError)) return "was invalid";
-  if (error.code === "ollama_timeout") return "timed out";
-  if (error.code === "ollama_request_failed") return "failed";
+  if (error.code === "local_provider_timeout") return "timed out";
+  if (error.code === "local_provider_request_failed") return "failed";
   return "was invalid";
 }
 
@@ -158,18 +199,81 @@ async function callOllama(
       });
     } catch (error) {
       if (controller.signal.aborted || (error instanceof Error && error.name === "AbortError")) {
-        throw new LocalNarrativeGenerationError("ollama_timeout", timeoutMessage(`generating ${component} components`, timeoutMs));
+        throw new LocalNarrativeGenerationError("local_provider_timeout", timeoutMessage("Ollama", `generating ${component} components`, timeoutMs));
       }
-      throw new LocalNarrativeGenerationError("ollama_unavailable", "Ollama was not reachable on the local machine.");
+      throw new LocalNarrativeGenerationError("local_provider_unavailable", "Ollama was not reachable on the local machine.");
     }
     if (!response.ok) {
-      throw new LocalNarrativeGenerationError("ollama_request_failed", `Ollama returned HTTP ${response.status} while generating ${component} components.`);
+      throw new LocalNarrativeGenerationError("local_provider_request_failed", `Ollama returned HTTP ${response.status} while generating ${component} components.`);
     }
     const payload = await response.json().catch(() => null) as { message?: { content?: unknown } } | null;
     const content = payload?.message?.content;
-    if (typeof content !== "string") throw new LocalNarrativeGenerationError("ollama_invalid_response", "Ollama returned no JSON content.");
+    if (typeof content !== "string") throw new LocalNarrativeGenerationError("local_provider_invalid_response", "Ollama returned no JSON content.");
     const parsed = extractJson(content);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new LocalNarrativeGenerationError("ollama_invalid_response", "Ollama returned invalid JSON.");
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new LocalNarrativeGenerationError("local_provider_invalid_response", "Ollama returned invalid JSON.");
+    return parsed;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/**
+ * BYOK's OpenAI-compatible counterpart to callOllama: same shape of request
+ * (system + user message, schema-constrained JSON response, one component
+ * per call), but POSTs to {baseUrl}/chat/completions with a bearer key and
+ * the OpenAI-style `response_format: {type:"json_schema",...}` wrapper
+ * instead of Ollama's raw `format` schema field. The prompt, the excerpts it
+ * contains, and the redaction/sanitization applied to the response are
+ * identical to the Ollama path - only the wire format differs.
+ */
+async function callByok(
+  baseUrl: string,
+  apiKey: string,
+  model: string,
+  prompt: string,
+  timeoutMs: number,
+  component: StoryPackComponent,
+): Promise<unknown> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    let response: Response;
+    try {
+      response = await fetch(`${baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: "system", content: SYSTEM_PROMPT },
+            { role: "user", content: prompt },
+          ],
+          response_format: {
+            type: "json_schema",
+            json_schema: {
+              name: component === "story" ? "buildstory_story" : "buildstory_insights",
+              strict: true,
+              schema: component === "story" ? STORY_PACK_STORY_SCHEMA : STORY_PACK_INSIGHTS_SCHEMA,
+            },
+          },
+          max_tokens: 1_500,
+        }),
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (controller.signal.aborted || (error instanceof Error && error.name === "AbortError")) {
+        throw new LocalNarrativeGenerationError("local_provider_timeout", timeoutMessage("The configured model provider", `generating ${component} components`, timeoutMs));
+      }
+      throw new LocalNarrativeGenerationError("local_provider_unavailable", "The configured BUILDSTORY_BYOK_BASE_URL provider was not reachable.");
+    }
+    if (!response.ok) {
+      throw new LocalNarrativeGenerationError("local_provider_request_failed", `The configured model provider returned HTTP ${response.status} while generating ${component} components.`);
+    }
+    const payload = await response.json().catch(() => null) as { choices?: Array<{ message?: { content?: unknown } }> } | null;
+    const content = payload?.choices?.[0]?.message?.content;
+    if (typeof content !== "string") throw new LocalNarrativeGenerationError("local_provider_invalid_response", "The configured model provider returned no JSON content.");
+    const parsed = extractJson(content);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new LocalNarrativeGenerationError("local_provider_invalid_response", "The configured model provider returned invalid JSON.");
     return parsed;
   } finally {
     clearTimeout(timeout);
@@ -207,7 +311,23 @@ async function callOllamaWithRepair(url: URL, model: string, prompt: string, tim
   return {};
 }
 
-async function resolveModel(url: URL, requestedModel: string | null | undefined, timeoutMs: number): Promise<string> {
+async function callByokWithRepair(baseUrl: string, apiKey: string, model: string, prompt: string, timeoutMs: number, allowedRefs: Set<string>, component: StoryPackComponent): Promise<unknown> {
+  let currentPrompt = prompt;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const value = await callByok(baseUrl, apiKey, model, currentPrompt, timeoutMs, component);
+    const invalid = unknownSourceRefs(value, allowedRefs);
+    const validation = validateStoryPackComponent(value, component, allowedRefs);
+    if ((!invalid.length && validation.ok) || attempt === 1) return value;
+    const feedback = [
+      invalid.length ? `unknown sourceRefs: ${invalid.join(", ")}` : "",
+      validation.errors.length ? `schema issues: ${validation.errors.slice(0, 8).join("; ")}` : "",
+    ].filter(Boolean).join(". ");
+    currentPrompt = `${prompt}\nValidation feedback: ${feedback}. Retry with one JSON object matching the requested component schema and only the provided source references.`;
+  }
+  return {};
+}
+
+async function resolveOllamaModel(url: URL, requestedModel: string | null | undefined, timeoutMs: number): Promise<string> {
   if (requestedModel?.trim()) return requestedModel.trim();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -217,21 +337,29 @@ async function resolveModel(url: URL, requestedModel: string | null | undefined,
       response = await fetch(new URL("api/tags", `${url.origin}/`).href, { signal: controller.signal, headers: { accept: "application/json" } });
     } catch (error) {
       if (controller.signal.aborted || (error instanceof Error && error.name === "AbortError")) {
-        throw new LocalNarrativeGenerationError("ollama_timeout", timeoutMessage("listing local models", timeoutMs));
+        throw new LocalNarrativeGenerationError("local_provider_timeout", timeoutMessage("Ollama", "listing local models", timeoutMs));
       }
-      throw new LocalNarrativeGenerationError("ollama_unavailable", "Ollama was not reachable on the local machine.");
+      throw new LocalNarrativeGenerationError("local_provider_unavailable", "Ollama was not reachable on the local machine.");
     }
-    if (!response.ok) throw new LocalNarrativeGenerationError("ollama_unavailable", `Ollama returned HTTP ${response.status} while listing models.`);
+    if (!response.ok) throw new LocalNarrativeGenerationError("local_provider_unavailable", `Ollama returned HTTP ${response.status} while listing models.`);
     const payload = await response.json().catch(() => null) as { models?: Array<{ name?: unknown }> } | null;
     const models = (payload?.models ?? []).map((item) => typeof item.name === "string" ? item.name : null).filter((item): item is string => Boolean(item));
     const selected = RECOMMENDED_MODELS.find((name) => models.includes(name)) ?? models[0];
-    if (!selected) throw new LocalNarrativeGenerationError("ollama_unavailable", "No local Ollama model is installed. Install gemma4:12b or choose another local model in Buildstory settings.");
+    if (!selected) throw new LocalNarrativeGenerationError("local_provider_unavailable", "No local Ollama model is installed. Install gemma4:12b or choose another local model in Buildstory settings.");
     return selected;
   } finally {
     clearTimeout(timeout);
   }
 }
 
+/**
+ * Redaction happens inside sanitizeStoryPack (called at the end of
+ * runNarrativeGeneration below) using input.redactor - this function exists
+ * only for the legacy flat-sections shape and is currently unreachable
+ * (defaultProfileNarrative + sanitizeStoryPack cover it); kept as-is rather
+ * than removed while auditing narrative generation, since it is not on the
+ * path this change touches.
+ */
 function redactSections(input: LocalNarrativeInput, candidate: Partial<GeneratedNarrativeSections>, defaults: GeneratedNarrativeSections) {
   const fallbacksUsed: string[] = [];
   const clean = (name: string, value: string | null, fallback: string, limit: number): string => {
@@ -268,57 +396,109 @@ function redactSections(input: LocalNarrativeInput, candidate: Partial<Generated
   };
 }
 
+/**
+ * Shared orchestration for both generators: build the two prompts, call the
+ * provider-specific `callComponentWithRepair` for "story" then "insights",
+ * merge into the legacy flat shape story-pack.ts still accepts, and run the
+ * result through sanitizeStoryPack (which applies input.redactor). Only the
+ * HTTP call itself differs between Ollama and BYOK - everything else,
+ * including the redaction boundary, is identical.
+ */
+async function runNarrativeGeneration(
+  input: LocalNarrativeInput,
+  provider: string,
+  model: string,
+  callComponentWithRepair: (prompt: string, allowedRefs: Set<string>, component: StoryPackComponent) => Promise<unknown>,
+): Promise<{ provider: string; model: string; sections: GeneratedNarrativeSections; storyPack?: ReportStoryPackV2; fallbacksUsed: string[] }> {
+  const defaultPack = createDefaultStoryPack(input.snapshot as ProjectSnapshot, input.profile, input.excerpts);
+  const sourceRefSet = new Set(defaultPack.sources.map((source) => source.ref));
+  const sourceRefs = [...sourceRefSet].filter((ref) => ref !== "GIT").join(", ");
+  const narrativePrompt = `${facts(input)}\n\nAvailable source refs: ${sourceRefs || "none"}, GIT when present. Return JSON only with hero {headline,summary}, buildArc [{phase,headline,summary,sourceRefs}], moments [{phase,kind,title,whatHappened,whyItMattered,sourceRefs}], and turningPoint {quote,sourceRefs}. Use only available source refs.`;
+  const profilePrompt = `${facts(input)}\n\nAvailable source refs: ${sourceRefs || "none"}, GIT when present. Return JSON only with decisions [{title,rationale,outcome,sourceRefs}], learnings [{title,detail,sourceRefs}], standoutTraits [{title,detail,sourceRefs}], and growthEdge {title,observation,nextStep,sourceRefs}. Use only available source refs.`;
+  let narrativeValue: unknown = {};
+  let profileValue: unknown = {};
+  try {
+    narrativeValue = await callComponentWithRepair(narrativePrompt, sourceRefSet, "story");
+    input.onProgress?.({ stage: "generating-story", state: "complete", model, message: "Story components generated (1/2)." });
+  } catch (error) {
+    if (error instanceof LocalNarrativeGenerationError && error.code === "local_provider_unavailable") throw error;
+    const reason = componentFallbackReason(error);
+    input.onProgress?.({ stage: "generating-story", state: "warning", model, message: `Story response ${reason}; using metric-derived fallback for story components.` });
+  }
+  input.onProgress?.({ stage: "generating-insights", state: "start", model, message: "Generating insight components (2/2)." });
+  try {
+    profileValue = await callComponentWithRepair(profilePrompt, sourceRefSet, "insights");
+    input.onProgress?.({ stage: "generating-insights", state: "complete", model, message: "Insight components generated (2/2)." });
+  } catch (error) {
+    if (error instanceof LocalNarrativeGenerationError && error.code === "local_provider_unavailable") throw error;
+    const reason = componentFallbackReason(error);
+    input.onProgress?.({ stage: "generating-insights", state: "warning", model, message: `Insight response ${reason}; using metric-derived fallback for insight components.` });
+  }
+  const narrativeObject = narrativeValue && typeof narrativeValue === "object" && !Array.isArray(narrativeValue) ? narrativeValue as Record<string, unknown> : {};
+  const profileObject = profileValue && typeof profileValue === "object" && !Array.isArray(profileValue) ? profileValue as Record<string, unknown> : {};
+  const legacyNarrative = {
+    ...narrativeObject,
+    ...(narrativeObject.hero ? {} : {
+      hero: { headline: narrativeObject.headline, summary: narrativeObject.narrative },
+      turningPoint: { quote: narrativeObject.turningPoint, sourceRefs: [defaultPack.sources[0]?.ref].filter(Boolean) },
+      learnings: Array.isArray(narrativeObject.learnings) ? narrativeObject.learnings.map((item) => ({ title: "Learning", detail: item, sourceRefs: [defaultPack.sources[0]?.ref].filter(Boolean) })) : undefined,
+    }),
+    ...(profileObject.decisions ? {} : {
+      decisions: Array.isArray(profileObject.decisionPatterns) ? profileObject.decisionPatterns.map((item) => ({ title: "Decision pattern", rationale: item, outcome: "Observed in the selected evidence.", sourceRefs: [defaultPack.sources[0]?.ref].filter(Boolean) })) : undefined,
+      standoutTraits: Array.isArray(profileObject.standoutTraits) ? profileObject.standoutTraits.map((item) => ({ title: "Standout trait", detail: item, sourceRefs: [defaultPack.sources[0]?.ref].filter(Boolean) })) : undefined,
+      growthEdge: typeof profileObject.growthEdge === "string" ? { title: "Growth edge", observation: profileObject.growthEdge, nextStep: "Review the next evidence window.", sourceRefs: [defaultPack.sources[0]?.ref].filter(Boolean) } : undefined,
+    }),
+    ...profileObject,
+  };
+  const normalized = sanitizeStoryPack(legacyNarrative, defaultPack, input.redactor);
+  const sections = sectionsFromStoryPack(normalized.storyPack);
+  return { provider, model, sections, storyPack: normalized.storyPack, fallbacksUsed: [...new Set(normalized.fallbacksUsed)].sort() };
+}
+
 export function createOllamaNarrativeGenerator(requestedModel?: string | null): LocalNarrativeGenerator {
   return async (input) => {
     const url = localBaseUrl();
     const timeoutMs = boundedEnvironmentInteger("BUILDSTORY_OLLAMA_TIMEOUT_MS", DEFAULT_TIMEOUT_MS, 1_000, 300_000);
     const contextTokens = boundedEnvironmentInteger("BUILDSTORY_OLLAMA_CONTEXT_TOKENS", DEFAULT_CONTEXT_TOKENS, 4_096, 32_768);
     input.onProgress?.({ stage: "resolving-model", state: "start", message: "Resolving the local narrative model." });
-    const model = await resolveModel(url, requestedModel, timeoutMs);
+    const model = await resolveOllamaModel(url, requestedModel, timeoutMs);
     input.onProgress?.({ stage: "resolving-model", state: "complete", model, message: `Using local model ${model}.` });
-    const defaults = defaultProfileNarrative(input.profile);
-    const defaultPack = createDefaultStoryPack(input.snapshot as ProjectSnapshot, input.profile, input.excerpts);
-    const sourceRefSet = new Set(defaultPack.sources.map((source) => source.ref));
-    const sourceRefs = [...sourceRefSet].filter((ref) => ref !== "GIT").join(", ");
-    const narrativePrompt = `${facts(input)}\n\nAvailable source refs: ${sourceRefs || "none"}, GIT when present. Return JSON only with hero {headline,summary}, buildArc [{phase,headline,summary,sourceRefs}], moments [{phase,kind,title,whatHappened,whyItMattered,sourceRefs}], and turningPoint {quote,sourceRefs}. Use only available source refs.`;
-    const profilePrompt = `${facts(input)}\n\nAvailable source refs: ${sourceRefs || "none"}, GIT when present. Return JSON only with decisions [{title,rationale,outcome,sourceRefs}], learnings [{title,detail,sourceRefs}], standoutTraits [{title,detail,sourceRefs}], and growthEdge {title,observation,nextStep,sourceRefs}. Use only available source refs.`;
-    let narrativeValue: unknown = {};
-    let profileValue: unknown = {};
-    try {
-      narrativeValue = await callOllamaWithRepair(url, model, narrativePrompt, timeoutMs, contextTokens, sourceRefSet, "story");
-      input.onProgress?.({ stage: "generating-story", state: "complete", model, message: "Story components generated (1/2)." });
-    } catch (error) {
-      if (error instanceof LocalNarrativeGenerationError && error.code === "ollama_unavailable") throw error;
-      const reason = componentFallbackReason(error);
-      input.onProgress?.({ stage: "generating-story", state: "warning", model, message: `Story response ${reason}; using metric-derived fallback for story components.` });
-    }
-    input.onProgress?.({ stage: "generating-insights", state: "start", model, message: "Generating insight components (2/2)." });
-    try {
-      profileValue = await callOllamaWithRepair(url, model, profilePrompt, timeoutMs, contextTokens, sourceRefSet, "insights");
-      input.onProgress?.({ stage: "generating-insights", state: "complete", model, message: "Insight components generated (2/2)." });
-    } catch (error) {
-      if (error instanceof LocalNarrativeGenerationError && error.code === "ollama_unavailable") throw error;
-      const reason = componentFallbackReason(error);
-      input.onProgress?.({ stage: "generating-insights", state: "warning", model, message: `Insight response ${reason}; using metric-derived fallback for insight components.` });
-    }
-    const narrativeObject = narrativeValue && typeof narrativeValue === "object" && !Array.isArray(narrativeValue) ? narrativeValue as Record<string, unknown> : {};
-    const profileObject = profileValue && typeof profileValue === "object" && !Array.isArray(profileValue) ? profileValue as Record<string, unknown> : {};
-    const legacyNarrative = {
-      ...narrativeObject,
-      ...(narrativeObject.hero ? {} : {
-        hero: { headline: narrativeObject.headline, summary: narrativeObject.narrative },
-        turningPoint: { quote: narrativeObject.turningPoint, sourceRefs: [defaultPack.sources[0]?.ref].filter(Boolean) },
-        learnings: Array.isArray(narrativeObject.learnings) ? narrativeObject.learnings.map((item) => ({ title: "Learning", detail: item, sourceRefs: [defaultPack.sources[0]?.ref].filter(Boolean) })) : undefined,
-      }),
-      ...(profileObject.decisions ? {} : {
-        decisions: Array.isArray(profileObject.decisionPatterns) ? profileObject.decisionPatterns.map((item) => ({ title: "Decision pattern", rationale: item, outcome: "Observed in the selected evidence.", sourceRefs: [defaultPack.sources[0]?.ref].filter(Boolean) })) : undefined,
-        standoutTraits: Array.isArray(profileObject.standoutTraits) ? profileObject.standoutTraits.map((item) => ({ title: "Standout trait", detail: item, sourceRefs: [defaultPack.sources[0]?.ref].filter(Boolean) })) : undefined,
-        growthEdge: typeof profileObject.growthEdge === "string" ? { title: "Growth edge", observation: profileObject.growthEdge, nextStep: "Review the next evidence window.", sourceRefs: [defaultPack.sources[0]?.ref].filter(Boolean) } : undefined,
-      }),
-      ...profileObject,
-    };
-    const normalized = sanitizeStoryPack(legacyNarrative, defaultPack, input.redactor);
-    const sections = sectionsFromStoryPack(normalized.storyPack);
-    return { provider: "ollama", model, sections, storyPack: normalized.storyPack, fallbacksUsed: [...new Set(normalized.fallbacksUsed)].sort() };
+    return runNarrativeGeneration(input, "ollama", model, (prompt, allowedRefs, component) =>
+      callOllamaWithRepair(url, model, prompt, timeoutMs, contextTokens, allowedRefs, component));
+  };
+}
+
+/**
+ * Bring-your-own-key: the model call goes to a cloud provider the creator
+ * configured with their own key (BUILDSTORY_BYOK_API_KEY/BASE_URL/MODEL),
+ * never through Buildstory. It reuses the exact same redacted excerpt
+ * selection as local Ollama mode (selectNarrativeEvidence in scanner.ts) and
+ * the same sanitizeStoryPack redaction pass on the response - only the HTTP
+ * destination differs. The resulting generatedNarrative still reports
+ * mode:"local" in the uploaded snapshot.
+ *
+ * `provider` is the fixed literal "byok", never the configured host: the
+ * final snapshot-wide fail-closed check (detectPrivateLocations in
+ * scanner.ts) scans every string field for URL/host/path patterns and would
+ * reject the whole snapshot if `provider` carried the real hostname - this
+ * was caught by that exact check in testing. The host is safe to log in a
+ * progress event (ephemeral, local-only, never part of the snapshot) but not
+ * safe to persist in an uploaded field.
+ */
+export function createByokNarrativeGenerator(requestedModel?: string | null): LocalNarrativeGenerator {
+  return async (input) => {
+    const config = byokConfig();
+    const model = requestedModel?.trim() || config.model || "gpt-5.6-luna";
+    const timeoutMs = boundedEnvironmentInteger("BUILDSTORY_BYOK_TIMEOUT_MS", DEFAULT_TIMEOUT_MS, 1_000, 300_000);
+    const hostForProgressOnly = (() => {
+      try {
+        return new URL(config.baseUrl).hostname;
+      } catch {
+        return "the configured provider";
+      }
+    })();
+    input.onProgress?.({ stage: "resolving-model", state: "complete", model, message: `Using configured model ${model} via ${hostForProgressOnly}.` });
+    return runNarrativeGeneration(input, "byok", model, (prompt, allowedRefs, component) =>
+      callByokWithRepair(config.baseUrl, config.apiKey, model, prompt, timeoutMs, allowedRefs, component));
   };
 }
