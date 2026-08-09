@@ -19,7 +19,7 @@ The protocol version remains 1.0. New CLIs add an optional capability inside the
   "deviceCode": "DEVICE_CODE",
   "client": {
     "command": "buildstory",
-    "version": "0.10.0"
+    "version": "1.0.0"
   },
   "capabilities": {
     "projectSnapshotSchemaVersions": ["1.7.0"],
