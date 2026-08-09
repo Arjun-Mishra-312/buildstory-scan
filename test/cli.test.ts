@@ -161,7 +161,7 @@ test("CLI completes connect, validated one-PUT upload, and authenticated status 
     if (request.method === "GET" && request.url === "/api/v1/cli/status/fixture-002") {
       statusAuthorization = request.headers.authorization ?? "";
       response.writeHead(200, { "content-type": "application/json" });
-      response.end(JSON.stringify({ protocolVersion: "1.0", status: "ready", reportReady: true }));
+      response.end(JSON.stringify({ protocolVersion: "1.0", status: "ready", reportReady: true, narrativeStatus: "generating" }));
       return;
     }
     if (request.method === "GET" && request.url === "/api/v1/cli/reports/fixture-002") {
@@ -283,6 +283,8 @@ test("CLI completes connect, validated one-PUT upload, and authenticated status 
     const status = await runProcess(["status"], environment);
     assert.equal(status.exitCode, 0, status.stderr);
     assert.match(status.stdout, /lifecycle: ready/);
+    assert.match(status.stdout, /AI narrative: generating/);
+    assert.match(status.stdout, /review the deterministic sections/i);
     assert.match(status.stdout, /local redacted build report/);
     assert.match(status.stdout, /1 sessions, 1 commits, 2 milestones, 0 warnings/);
     assert.equal(status.stdout.includes(bearerToken), false);
@@ -394,6 +396,29 @@ test("CLI requires local-scan consent before discovery", async () => {
     assert.equal(result.stdout, "");
     assert.match(result.stderr, /CONSENT_REQUIRED/);
     assert.equal(result.stderr.includes(fixture.repository), false);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("scan-upload stops before scanning when no active upload grant exists", async () => {
+  const fixture = await createLocalFixture();
+  const stateDirectory = path.join(fixture.root, "missing-upload-state");
+  try {
+    const result = await runProcess([
+      "scan-upload",
+      "--repo", fixture.repository,
+      "--source", "codex",
+      "--codex-home", fixture.codexHome,
+      "--consent", "local-scan",
+      "--upload-consent", "local-dashboard",
+      "--with-evidence",
+      "--review",
+    ], { BUILDSTORY_STATE_DIR: stateDirectory });
+    assert.equal(result.exitCode, 2);
+    assert.equal(result.stdout, "");
+    assert.match(result.stderr, /UPLOAD_CONNECTION_REQUIRED/);
+    assert.match(result.stderr, /connect again/i);
   } finally {
     await fixture.cleanup();
   }

@@ -629,7 +629,16 @@ export async function buildProjectSnapshot(options: ScanOptions): Promise<Projec
     if (narrativeMode === "cloud") narrativeEvidence = {
       bundleVersion: NARRATIVE_EVIDENCE_BUNDLE_VERSION,
       generatedAt: timeWindow.end,
-      policy: { ...budget, excerptSelection: requestedBudget?.policyVersion ?? "deterministic-heuristic-v1" },
+      // Per-session quotas are selector implementation details. Keep them out
+      // of the wire contract: NarrativeEvidencePolicy intentionally exposes
+      // only the reviewed global bounds and their policy version.
+      policy: {
+        maxExcerpts: budget.maxExcerpts,
+        maxCharsPerExcerpt: budget.maxCharsPerExcerpt,
+        maxTotalChars: budget.maxTotalChars,
+        ...(budget.maxTotalBytes !== undefined ? { maxTotalBytes: budget.maxTotalBytes } : {}),
+        excerptSelection: requestedBudget?.policyVersion ?? "deterministic-heuristic-v1",
+      },
       consent: {
         mode: "explicit-cli-review",
         statementVersion: NARRATIVE_EVIDENCE_CONSENT_VERSION,

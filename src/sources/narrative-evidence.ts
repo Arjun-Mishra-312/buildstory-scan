@@ -16,6 +16,14 @@ export const DEFAULT_MAX_CHARS_PER_EXCERPT = 600;
 export const DEFAULT_MAX_TOTAL_EXCERPT_CHARS = 20_000;
 export const MAX_EXCERPTS_PER_SESSION = 6;
 export const MAX_ASSISTANT_DECISIONS_PER_SESSION = 3;
+// Standard cloud/BYOK models have substantially more reliable context than
+// the minimum local baseline. This remains a one-pass Standard report; the
+// larger allowance improves session coverage without pretending to be Deep.
+export const CLOUD_STANDARD_MAX_EXCERPTS = 80;
+export const CLOUD_STANDARD_MAX_CHARS_PER_EXCERPT = 800;
+export const CLOUD_STANDARD_MAX_TOTAL_EXCERPT_CHARS = 60_000;
+export const CLOUD_STANDARD_MAX_EXCERPTS_PER_SESSION = 8;
+export const CLOUD_STANDARD_MAX_ASSISTANT_DECISIONS_PER_SESSION = 4;
 // Deep uses the larger context as bounded capacity, while the CLI dynamically
 // lowers the byte allowance to keep the complete upload below its grant.
 export const DEEP_MAX_EXCERPTS = 240;

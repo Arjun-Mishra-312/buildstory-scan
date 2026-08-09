@@ -65,6 +65,7 @@ export type LocalStatusResult =
       connection: ConnectionStatus;
       lifecycle: "accepted" | "processing" | "ready" | "failed";
       reportReady: boolean;
+      narrativeStatus: "not_requested" | "queued" | "generating" | "ready" | "failed" | null;
       report: SafeReportSummary | null;
     };
 
@@ -305,17 +306,26 @@ function authorizationHeaders(access: StoredStatusAccess): HeadersInit {
   };
 }
 
-function validateStatusResponse(value: unknown): { lifecycle: "accepted" | "processing" | "ready" | "failed"; reportReady: boolean } {
+function validateStatusResponse(value: unknown): {
+  lifecycle: "accepted" | "processing" | "ready" | "failed";
+  reportReady: boolean;
+  narrativeStatus: "not_requested" | "queued" | "generating" | "ready" | "failed" | null;
+} {
   if (!isRecord(value)
-    || !hasExactKeys(value, ["protocolVersion", "status", "reportReady"])
+    || !(hasExactKeys(value, ["protocolVersion", "status", "reportReady"])
+      || hasExactKeys(value, ["protocolVersion", "status", "reportReady", "narrativeStatus"]))
     || value.protocolVersion !== CONNECT_PROTOCOL_VERSION
     || !["accepted", "processing", "ready", "failed"].includes(value.status as string)
-    || typeof value.reportReady !== "boolean") {
+    || typeof value.reportReady !== "boolean"
+    || ("narrativeStatus" in value && !["not_requested", "queued", "generating", "ready", "failed"].includes(value.narrativeStatus as string))) {
     throw new ScannerError("STATUS_RESPONSE_INVALID", "The local dashboard returned an invalid content-free status response.");
   }
   return {
     lifecycle: value.status as "accepted" | "processing" | "ready" | "failed",
     reportReady: value.reportReady,
+    narrativeStatus: "narrativeStatus" in value
+      ? value.narrativeStatus as "not_requested" | "queued" | "generating" | "ready" | "failed"
+      : null,
   };
 }
 
@@ -402,6 +412,7 @@ export async function readLocalDashboardStatus(options: UploadProjectSnapshotOpt
     connection,
     lifecycle: status.lifecycle,
     reportReady: status.reportReady,
+    narrativeStatus: status.narrativeStatus,
     report,
   };
 }

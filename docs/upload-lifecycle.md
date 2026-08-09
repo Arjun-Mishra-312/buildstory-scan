@@ -59,11 +59,12 @@ No cookie jar is used (`credentials: omit`), redirects are refused, and the body
 {
   "protocolVersion": "1.0",
   "status": "accepted",
-  "reportReady": false
+  "reportReady": false,
+  "narrativeStatus": "queued"
 }
 ```
 
-`status` may be `accepted`, `processing`, `ready`, or `failed`. When `reportReady` is true and a report URL exists, the CLI requests it with the same bearer and accepts only:
+`status` may be `accepted`, `processing`, `ready`, or `failed`. `narrativeStatus` is an optional protocol-1.0 extension and may be `not_requested`, `queued`, `generating`, `ready`, or `failed`; an older server that omits it remains compatible. `reportReady` means the deterministic private report can be browsed. It can become true while the separately queued AI narrative is still `queued` or `generating`. When `reportReady` is true and a report URL exists, the CLI requests it with the same bearer and accepts only:
 
 ```json
 {

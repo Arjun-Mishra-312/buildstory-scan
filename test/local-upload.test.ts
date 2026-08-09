@@ -126,6 +126,7 @@ test("a pinned HTTPS remote host completes connect, upload, and status without a
           protocolVersion: "1.0",
           status: "ready",
           reportReady: false,
+          narrativeStatus: "generating",
         }), { status: 200, headers: { "content-type": "application/json" } });
       },
     });
@@ -134,6 +135,7 @@ test("a pinned HTTPS remote host completes connect, upload, and status without a
     if (status.source === "dashboard") {
       assert.equal(status.lifecycle, "ready");
       assert.equal(status.reportReady, false);
+      assert.equal(status.narrativeStatus, "generating");
     }
   } finally {
     await fixture.cleanup();

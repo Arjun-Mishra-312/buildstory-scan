@@ -8,10 +8,11 @@ import { canonicalJson } from "./canonical-json.js";
 import { connectBuildStory } from "./connect.js";
 import type { AnalysisTier, NarrativeProvider, ProjectSnapshot, ProviderId } from "./contract.js";
 import { PROJECT_SNAPSHOT_SCHEMA_VERSION, SCANNER_VERSION } from "./contract.js";
-import { getStoredUploadGrant } from "./connection-state.js";
+import { getConnectionStatus, getStoredUploadGrant } from "./connection-state.js";
 import { ScannerError, safeErrorMessage } from "./errors.js";
 import { readLocalDashboardStatus, uploadProjectSnapshot } from "./local-upload.js";
 import { createByokNarrativeGenerator, createOllamaNarrativeGenerator, LocalNarrativeGenerationError } from "./narrative/local.js";
+import { localCapabilityProfile } from "./narrative/local-capability.js";
 import { writeSnapshotFile } from "./output.js";
 import { Redactor } from "./redaction.js";
 import { inspectRepository } from "./repository.js";
@@ -24,6 +25,11 @@ import {
   DEEP_MAX_EXCERPTS,
   DEEP_MAX_EXCERPTS_PER_SESSION,
   DEEP_MAX_TOTAL_EXCERPT_BYTES,
+  CLOUD_STANDARD_MAX_ASSISTANT_DECISIONS_PER_SESSION,
+  CLOUD_STANDARD_MAX_CHARS_PER_EXCERPT,
+  CLOUD_STANDARD_MAX_EXCERPTS,
+  CLOUD_STANDARD_MAX_EXCERPTS_PER_SESSION,
+  CLOUD_STANDARD_MAX_TOTAL_EXCERPT_CHARS,
 } from "./sources/narrative-evidence.js";
 
 const TOKEN_MAGNITUDES: ReadonlyArray<readonly [number, string]> = [
@@ -514,6 +520,24 @@ async function effectiveNarrative(parsed: ParsedScannerArguments): Promise<Effec
     // uploading excerpts. The mismatch (grant says local/off, flag asks for evidence) is
     // surfaced as NARRATIVE_MODE_CONFLICT by the caller instead of silently resolved here.
     const grant = await getStoredUploadGrant();
+    if (!grant) {
+      const connection = await getConnectionStatus();
+      if (connection.state === "expired") {
+        throw new ScannerError("UPLOAD_GRANT_EXPIRED", "The one-time local upload grant expired. Run buildstory-scan connect again.", 2);
+      }
+      if (connection.state === "uploaded") {
+        throw new ScannerError(
+          "UPLOAD_GRANT_ALREADY_USED",
+          "The stored grant has already uploaded a snapshot. Run buildstory-scan status, or connect again for another upload.",
+          2,
+        );
+      }
+      throw new ScannerError(
+        "UPLOAD_CONNECTION_REQUIRED",
+        "No active one-time upload grant is available, or the previous grant expired. Run buildstory-scan connect again with a fresh dashboard code.",
+        2,
+      );
+    }
     if (grant?.narrative) return { ...grant.narrative, uploadMaxBytes: grant.maxBytes };
     // A grant written by an old CLI has no mode block. Preserve its historical behavior.
     return {
@@ -536,6 +560,7 @@ function scanOptions(parsed: ParsedScannerArguments, narrative: EffectiveNarrati
   const byok = narrative.mode === "byok";
   const cloudEvidence = narrative.mode === "cloud" && parsed.withEvidence;
   const deep = narrative.analysisTier === "deep" && narrative.mode !== "local";
+  const localCapability = local ? localCapabilityProfile() : null;
   const deepEvidenceBytes = Math.max(0, Math.min(DEEP_MAX_TOTAL_EXCERPT_BYTES, (narrative.uploadMaxBytes ?? 1024 * 1024) - 128 * 1024));
   const deepBudget = deep ? {
     maxExcerpts: DEEP_MAX_EXCERPTS,
@@ -545,6 +570,13 @@ function scanOptions(parsed: ParsedScannerArguments, narrative: EffectiveNarrati
     maxExcerptsPerSession: DEEP_MAX_EXCERPTS_PER_SESSION,
     maxAssistantDecisionsPerSession: DEEP_MAX_ASSISTANT_DECISIONS_PER_SESSION,
     policyVersion: "deep-evidence-v2" as const,
+  } : undefined;
+  const standardCloudBudget = !deep && (cloudEvidence || byok) ? {
+    maxExcerpts: CLOUD_STANDARD_MAX_EXCERPTS,
+    maxCharsPerExcerpt: CLOUD_STANDARD_MAX_CHARS_PER_EXCERPT,
+    maxTotalChars: CLOUD_STANDARD_MAX_TOTAL_EXCERPT_CHARS,
+    maxExcerptsPerSession: CLOUD_STANDARD_MAX_EXCERPTS_PER_SESSION,
+    maxAssistantDecisionsPerSession: CLOUD_STANDARD_MAX_ASSISTANT_DECISIONS_PER_SESSION,
   } : undefined;
   return {
     repositoryPath: parsed.repo,
@@ -561,7 +593,7 @@ function scanOptions(parsed: ParsedScannerArguments, narrative: EffectiveNarrati
     ...(cloudEvidence
       ? {
           narrative: { mode: "cloud" as const, model: null },
-          narrativeEvidence: deepBudget ?? {},
+          narrativeEvidence: deepBudget ?? standardCloudBudget ?? {},
         }
       // BYOK reports to the scanner core as "local": the resulting
       // generatedNarrative is always mode:"local" in the snapshot (see
@@ -569,11 +601,15 @@ function scanOptions(parsed: ParsedScannerArguments, narrative: EffectiveNarrati
       // whichever narrativeGenerator actually ran below, distinguishes
       // Ollama from a BYOK model.
       : local || byok
-        ? { narrative: { mode: "local" as const, model: narrative.model }, ...(byok && deepBudget ? { narrativeEvidenceBudget: deepBudget } : {}) }
+        ? {
+            narrative: { mode: "local" as const, model: narrative.model },
+            ...(localCapability ? { narrativeEvidenceBudget: localCapability.evidenceBudget } : {}),
+            ...(byok ? { narrativeEvidenceBudget: deepBudget ?? standardCloudBudget ?? {} } : {}),
+          }
         : narrative.mode === "off"
           ? { narrative: { mode: "off" as const, model: narrative.model } }
           : {}),
-    ...(local ? { narrativeGenerator: createOllamaNarrativeGenerator(narrative.model) } : {}),
+    ...(local ? { narrativeGenerator: createOllamaNarrativeGenerator(narrative.model, localCapability ?? undefined) } : {}),
     ...(byok ? {
       narrativeGenerator: createByokNarrativeGenerator(narrative.model, narrative.provider ?? "openrouter", narrative.analysisTier),
       ...(parsed.review ? {
@@ -651,7 +687,7 @@ function printEvidenceForReview(snapshot: ReviewableSnapshot): void {
     process.stdout.write(`--- ${provider ? `[${provider}] ` : ""}[${excerpt.role}] ${excerpt.sessionRef} @ ${excerpt.occurredAt} ---\n${excerpt.text}\n\n`);
   }
   process.stdout.write(
-    `(${bundle.discarded.candidates} candidate${bundle.discarded.candidates === 1 ? "" : "s"} considered; ${bundle.discarded.rejectedByRedaction} dropped by redaction, ${bundle.discarded.rejectedByBudget} dropped by budget.)\n\n`,
+    `${bundle.excerpts.length} of ${bundle.discarded.candidates} candidate excerpt${bundle.discarded.candidates === 1 ? "" : "s"} selected for narrative analysis. ${bundle.discarded.rejectedByRedaction} omitted by redaction and ${bundle.discarded.rejectedByBudget} omitted by the evidence policy; all included sessions still contribute deterministic metrics.\n\n`,
   );
 }
 
@@ -771,7 +807,13 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
       }
       return 0;
     }
-    process.stdout.write(`Local dashboard lifecycle: ${result.lifecycle}. Report: ${result.reportReady ? "ready" : "pending"}.\n`);
+    const narrativeLabel = result.narrativeStatus === "not_requested"
+      ? "not requested"
+      : result.narrativeStatus ?? "status unavailable from this dashboard version";
+    process.stdout.write(`Local dashboard lifecycle: ${result.lifecycle}. Report: ${result.reportReady ? "ready" : "pending"}. AI narrative: ${narrativeLabel}.\n`);
+    if (result.reportReady && (result.narrativeStatus === "queued" || result.narrativeStatus === "generating")) {
+      process.stdout.write("The private report is available now; its AI narrative is still being generated in the background. You can review the deterministic sections while it finishes.\n");
+    }
     if (result.report) {
       process.stdout.write(`${result.report.summary}\n`);
       process.stdout.write(

@@ -189,6 +189,41 @@ test("Codex narrative evidence respects a small maxExcerpts budget deterministic
   }
 });
 
+test("deep narrative selector quotas remain internal and the emitted evidence policy validates", async () => {
+  const fixture = await createCodexNarrativeFixture();
+  try {
+    const snapshot = await buildProjectSnapshot({
+      repositoryPath: fixture.repository,
+      consent: "local-scan",
+      providers: ["codex"],
+      codexHome: fixture.codexHome,
+      since: "2026-08-04T00:00:00Z",
+      until: "2026-08-05T00:00:00Z",
+      narrativeEvidence: {
+        maxExcerpts: 240,
+        maxCharsPerExcerpt: 1_500,
+        maxTotalChars: 700 * 1024,
+        maxTotalBytes: 700 * 1024,
+        maxExcerptsPerSession: 12,
+        maxAssistantDecisionsPerSession: 6,
+        policyVersion: "deep-evidence-v2",
+      },
+    });
+
+    assert.deepEqual(Object.keys(snapshot.narrativeEvidence?.policy ?? {}).sort(), [
+      "excerptSelection",
+      "maxCharsPerExcerpt",
+      "maxExcerpts",
+      "maxTotalBytes",
+      "maxTotalChars",
+    ]);
+    assert.equal(snapshot.narrativeEvidence?.policy.excerptSelection, "deep-evidence-v2");
+    assert.doesNotThrow(() => validateProjectSnapshot(snapshot));
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test("a Codex session keeps per-response model usage across switches and resets", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "story-scanner-codex-model-ledger-"));
   try {

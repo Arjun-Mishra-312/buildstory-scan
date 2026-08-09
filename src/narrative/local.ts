@@ -507,14 +507,20 @@ async function runNarrativeGeneration(
   return { provider, model, sections, storyPack: normalized.storyPack, fallbacksUsed: [...new Set(normalized.fallbacksUsed)].sort() };
 }
 
-export function createOllamaNarrativeGenerator(requestedModel?: string | null): LocalNarrativeGenerator {
+export function createOllamaNarrativeGenerator(
+  requestedModel?: string | null,
+  capability?: { contextTokens: number; label: string; memoryGiB: number; logicalCpus: number },
+): LocalNarrativeGenerator {
   return async (input) => {
     const url = localBaseUrl();
     const timeoutMs = boundedEnvironmentInteger("BUILDSTORY_OLLAMA_TIMEOUT_MS", DEFAULT_TIMEOUT_MS, 1_000, 300_000);
-    const contextTokens = boundedEnvironmentInteger("BUILDSTORY_OLLAMA_CONTEXT_TOKENS", DEFAULT_CONTEXT_TOKENS, 4_096, 32_768);
+    const contextTokens = boundedEnvironmentInteger("BUILDSTORY_OLLAMA_CONTEXT_TOKENS", capability?.contextTokens ?? DEFAULT_CONTEXT_TOKENS, 4_096, 32_768);
     input.onProgress?.({ stage: "resolving-model", state: "start", message: "Resolving the local narrative model." });
     const model = await resolveOllamaModel(url, requestedModel, timeoutMs);
-    input.onProgress?.({ stage: "resolving-model", state: "complete", model, message: `Using local model ${model}.` });
+    const capabilityNote = capability
+      ? ` ${capability.label} profile (${capability.memoryGiB} GiB RAM, ${capability.logicalCpus} logical CPUs, ${contextTokens.toLocaleString("en-US")} context tokens).`
+      : "";
+    input.onProgress?.({ stage: "resolving-model", state: "complete", model, message: `Using local model ${model}.${capabilityNote}` });
     return runNarrativeGeneration(input, "ollama", model, (prompt, allowedRefs, component) =>
       callOllamaWithRepair(url, model, prompt, timeoutMs, contextTokens, allowedRefs, component));
   };
