@@ -5,11 +5,12 @@ import type {
   ReportStoryPackV2,
   ReportStoryPackV3,
   StoryPackFinding,
-  StoryPackRecommendation,
   StoryPackPhase,
+  StoryPackSignalFinding,
   StoryPackSource,
 } from "../contract.js";
 import type { BuilderProfile } from "../insights/profile.js";
+import { computeSignals } from "../insights/signals.js";
 import type { Redactor } from "../redaction.js";
 
 const LIMITS = {
@@ -140,14 +141,15 @@ export const STORY_PACK_INSIGHTS_SCHEMA = {
         },
       },
     },
+    // nextStep is deliberately absent - see the matching comment in the web
+    // package's lib/narrative/story-pack.ts.
     growthEdge: {
       type: "object",
       additionalProperties: false,
-      required: ["title", "observation", "nextStep", "sourceRefs"],
+      required: ["title", "observation", "sourceRefs"],
       properties: {
         title: { type: "string", minLength: 1, maxLength: LIMITS.title },
         observation: { type: "string", minLength: 1, maxLength: LIMITS.body },
-        nextStep: { type: "string", minLength: 1, maxLength: LIMITS.shortBody },
         sourceRefs: SOURCE_REFS_SCHEMA,
       },
     },
@@ -264,7 +266,7 @@ export function validateStoryPackComponent(value: unknown, component: StoryPackC
     }
     const growth = objectValue(candidate.growthEdge);
     if (!growth) errors.push("growthEdge must be an object.");
-    else { for (const [key, max] of [["title", LIMITS.title], ["observation", LIMITS.body], ["nextStep", LIMITS.shortBody]] as const) { const issue = stringIssue(growth[key], `growthEdge.${key}`, 1, max); if (issue) errors.push(issue); } errors.push(...refIssues(growth.sourceRefs, "growthEdge.sourceRefs", allowedRefs)); }
+    else { for (const [key, max] of [["title", LIMITS.title], ["observation", LIMITS.body]] as const) { const issue = stringIssue(growth[key], `growthEdge.${key}`, 1, max); if (issue) errors.push(issue); } errors.push(...refIssues(growth.sourceRefs, "growthEdge.sourceRefs", allowedRefs)); }
   }
   return { ok: errors.length === 0, errors: errors.slice(0, 20) };
 }
@@ -305,6 +307,7 @@ export function createDefaultStoryPack(snapshot: ProjectSnapshot, profile: Build
   void excerpts;
   const sources = sourceCatalog(snapshot);
   const sourceRefs = sources.length ? [sources[0]!.ref] : [];
+  const signals = computeSignals({ sessions: snapshot.sessions, usage: snapshot.usage, git: snapshot.git, timeWindow: snapshot.timeWindow, narrativeEvidence: snapshot.narrativeEvidence, sources });
   const phases: Array<{ phase: StoryPackPhase; headline: string; summary: string }> = [
     { phase: "discover", headline: "Mapped the build surface", summary: `${snapshot.sessions.length} repository-scoped sessions established the observed build context.` },
     { phase: "decide", headline: "Turned signals into a path", summary: profile.archetype.rationale.join(" ").slice(0, LIMITS.arcSummary) || "Observed activity was compared as an aggregate signal." },
@@ -313,6 +316,7 @@ export function createDefaultStoryPack(snapshot: ProjectSnapshot, profile: Build
   return {
     version: "2.0.0",
     sources,
+    signals,
     hero: { headline: profile.archetype.name, summary: `A content-free report of ${snapshot.sessions.length} sessions and ${snapshot.git.commits} commits in the selected window.` },
     buildArc: phases.map((item) => ({ ...item, sourceRefs })),
     moments: phases.map((item, index) => ({
@@ -336,7 +340,7 @@ export function createDefaultStoryPack(snapshot: ProjectSnapshot, profile: Build
       { title: profile.archetype.name, detail: profile.archetype.rationale.join(" ").slice(0, LIMITS.shortBody), sourceRefs },
       { title: "Evidence-led execution", detail: "The strongest available trait is derived from the recorded activity and its source coverage.", sourceRefs },
     ],
-    growthEdge: { title: "Prepare the next decision earlier", observation: "Planning and steering scores are proxies derived from observable session signals.", nextStep: "Review the evidence before treating the profile as a personal conclusion.", sourceRefs },
+    growthEdge: { title: "Prepare the next decision earlier", observation: "Planning and steering scores are proxies derived from observable session signals.", sourceRefs },
   };
 }
 
@@ -430,6 +434,7 @@ export function sanitizeStoryPack(
   const storyPack: ReportStoryPackV2 = {
     version: "2.0.0",
     sources: fallback.sources,
+    signals: fallback.signals,
     hero: {
       headline: clean("hero.headline", hero.headline, fallback.hero.headline, LIMITS.headline),
       summary: clean("hero.summary", hero.summary, fallback.hero.summary, LIMITS.summary),
@@ -443,7 +448,6 @@ export function sanitizeStoryPack(
     growthEdge: {
       title: clean("growthEdge.title", growth.title, fallbackGrowth.title, LIMITS.title),
       observation: clean("growthEdge.observation", growth.observation, fallbackGrowth.observation, LIMITS.body),
-      nextStep: clean("growthEdge.nextStep", growth.nextStep, fallbackGrowth.nextStep, LIMITS.shortBody),
       sourceRefs: sourceList("growthEdge.sourceRefs", growth.sourceRefs, fallbackGrowth.sourceRefs),
     },
   };
@@ -464,14 +468,19 @@ export function sanitizeStoryPack(
   const findings = (path: string, value: unknown, max: number): StoryPackFinding[] => Array.isArray(value)
     ? value.slice(0, max).map((item, index) => finding(`${path}.${index}`, item))
     : [];
-  const recommendations: StoryPackRecommendation[] = Array.isArray(deep.nextBuildActions)
-    ? deep.nextBuildActions.slice(0, 6).map((value, index) => {
+  const allowedSignalIds = new Set(fallback.signals.map((signal) => signal.id));
+  const fallbackSignalId = fallback.signals[0]?.id;
+  const byTheNumbers: StoryPackSignalFinding[] = Array.isArray(deep.byTheNumbers)
+    ? deep.byTheNumbers.slice(0, 8).flatMap((value, index) => {
         const item = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
-        return {
-          ...finding(`deepAnalysis.nextBuildActions.${index}`, value, "Next build action", "Address the strongest evidence-backed opportunity in the next chapter."),
-          priority: item.priority === "now" || item.priority === "later" ? item.priority : "next",
-          rationale: clean(`deepAnalysis.nextBuildActions.${index}.rationale`, item.rationale, "Prioritized from the reviewed evidence.", 600),
-        };
+        const path = `deepAnalysis.byTheNumbers.${index}`;
+        const signalId = typeof item.signalId === "string" && allowedSignalIds.has(item.signalId) ? item.signalId : fallbackSignalId;
+        if (signalId !== item.signalId) fallbacks.push(`${path}.signalId`);
+        // No computed signal at all (an evidence-thin snapshot) means there
+        // is nothing for this finding to attach to - drop it rather than
+        // fabricate an id.
+        if (!signalId) return [];
+        return [{ ...finding(path, value), signalId }];
       })
     : [];
   const coverageValue = deep.coverage && typeof deep.coverage === "object" && !Array.isArray(deep.coverage) ? deep.coverage as Record<string, unknown> : {};
@@ -482,12 +491,10 @@ export function sanitizeStoryPack(
     version: "3.0.0",
     analysisTier: "deep",
     deepAnalysis: {
-      executiveSynthesis: finding("deepAnalysis.executiveSynthesis", deep.executiveSynthesis, storyPack.hero.headline, storyPack.hero.summary),
-      decisionReview: findings("deepAnalysis.decisionReview", deep.decisionReview, 8),
-      frictionAndRecovery: findings("deepAnalysis.frictionAndRecovery", deep.frictionAndRecovery, 6),
-      engineeringPatterns: findings("deepAnalysis.engineeringPatterns", deep.engineeringPatterns, 6),
-      risksAndEvidenceGaps: findings("deepAnalysis.risksAndEvidenceGaps", deep.risksAndEvidenceGaps, 5),
-      nextBuildActions: recommendations,
+      openingLine: finding("deepAnalysis.openingLine", deep.openingLine, storyPack.hero.headline, storyPack.hero.summary),
+      signatureMoves: findings("deepAnalysis.signatureMoves", deep.signatureMoves, 6),
+      byTheNumbers,
+      whereItGotHard: findings("deepAnalysis.whereItGotHard", deep.whereItGotHard, 6),
       chapterChanges: findings("deepAnalysis.chapterChanges", deep.chapterChanges, 5),
       coverage: {
         sessionsSeen: boundedCount(coverageValue.sessionsSeen, 100_000),

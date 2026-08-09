@@ -2,7 +2,7 @@
 
 export const PROJECT_SNAPSHOT_SCHEMA_VERSION = "1.7.0" as const;
 export const SCANNER_NAME = "buildstory" as const;
-export const SCANNER_VERSION = "1.0.1" as const;
+export const SCANNER_VERSION = "1.1.0" as const;
 export const CONSENT_STATEMENT_VERSION = "1.0" as const;
 /** Separate, additional consent for the opt-in narrativeEvidence bundle only. */
 export const NARRATIVE_EVIDENCE_CONSENT_VERSION = "1.0" as const;
@@ -191,6 +191,31 @@ export type GeneratedNarrativeSections = {
 export type StoryPackPhase = "discover" | "decide" | "deliver";
 export type StoryPackMomentKind = "discovery" | "decision" | "breakthrough" | "delivery";
 
+export type SignalFamily = "rhythm" | "tooling" | "conversation" | "spend" | "output" | "evidence";
+
+/**
+ * A true, ranked, publishable fact computed entirely from deterministic
+ * snapshot data - no model call, no possibility of hallucination. See
+ * insights/signals.ts for computeSignals(). The LLM layer may only write
+ * framing over a signal's own headline/detail/value; it can never invent a
+ * number, and validateStoryPackComponent rejects any byTheNumbers.signalId
+ * that doesn't name a signal actually returned by computeSignals - the same
+ * way it already rejects an unknown sourceRef.
+ */
+export interface Signal {
+  id: string;
+  family: SignalFamily;
+  headline: string;
+  detail: string;
+  value: number;
+  unit: string;
+  /** 0-100, a deterministic distance-from-baseline per family. Higher = more surprising. */
+  notability: number;
+  /** Auditable, mirrors profile.ts's score.formula house style. */
+  formula: string;
+  sourceRefs: string[];
+}
+
 export interface StoryPackSource {
   ref: string;
   provider: ProviderId | "git";
@@ -232,29 +257,49 @@ export interface ReportStoryPackV2 {
   }>;
   learnings: Array<{ title: string; detail: string; sourceRefs: string[] }>;
   standoutTraits: Array<{ title: string; detail: string; sourceRefs: string[] }>;
+  /** `nextStep` is deliberately optional - see the matching comment in the web package's scanner-project-snapshot.ts. */
   growthEdge: {
     title: string;
     observation: string;
-    nextStep: string;
+    nextStep?: string;
     sourceRefs: string[];
   };
+  /** Deterministic, ranked facts - present on every tier and every narrative mode, including "off". See insights/signals.ts. */
+  signals: Signal[];
 }
 
 export type StoryPackConfidence = "high" | "medium" | "low";
 export type StoryPackFinding = { title: string; summary: string; sourceRefs: string[]; confidence: StoryPackConfidence };
+/** @deprecated Cut from generation (see the report-redesign sprint); kept only so a pack stored before that change still typechecks. */
 export type StoryPackRecommendation = StoryPackFinding & { priority: "now" | "next" | "later"; rationale: string };
+/** An LLM-written finding that frames one specific computed Signal - never a number the model invented. */
+export type StoryPackSignalFinding = StoryPackFinding & { signalId: string };
 export interface ReportStoryPackV3 extends Omit<ReportStoryPackV2, "version"> {
   version: "3.0.0";
   analysisTier: AnalysisTier;
   deepAnalysis?: {
-    executiveSynthesis: StoryPackFinding;
-    decisionReview: StoryPackFinding[];
-    frictionAndRecovery: StoryPackFinding[];
-    engineeringPatterns: StoryPackFinding[];
-    risksAndEvidenceGaps: StoryPackFinding[];
-    nextBuildActions: StoryPackRecommendation[];
+    /** The one-sentence hook. Replaces the old `executiveSynthesis`. */
+    openingLine: StoryPackFinding;
+    /** How this builder distinctively works, grounded in computed ratios. Replaces `engineeringPatterns`. */
+    signatureMoves: StoryPackFinding[];
+    /** LLM framing over a computed Signal - the anti-hallucination mechanism. Every entry's signalId must name a real signal. */
+    byTheNumbers: StoryPackSignalFinding[];
+    /** Friction as narrative, not audit findings. Replaces `frictionAndRecovery`. */
+    whereItGotHard: StoryPackFinding[];
     chapterChanges: StoryPackFinding[];
     coverage: { sessionsSeen: number; excerptsUsed: number; evidenceBytes: number; windowStart: IsoDateTime; windowEnd: IsoDateTime };
+    /** @deprecated Renamed to `openingLine`. */
+    executiveSynthesis?: StoryPackFinding;
+    /** @deprecated Renamed to `signatureMoves`. */
+    engineeringPatterns?: StoryPackFinding[];
+    /** @deprecated Renamed to `whereItGotHard`. */
+    frictionAndRecovery?: StoryPackFinding[];
+    /** @deprecated Cut from generation - advice/recommendations are off-vision for this product. */
+    decisionReview?: StoryPackFinding[];
+    /** @deprecated Cut from generation. */
+    risksAndEvidenceGaps?: StoryPackFinding[];
+    /** @deprecated Cut from generation - the report surfaces facts, not next steps. */
+    nextBuildActions?: StoryPackRecommendation[];
   };
 }
 export type ReportStoryPack = ReportStoryPackV2 | ReportStoryPackV3;

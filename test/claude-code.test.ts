@@ -297,12 +297,10 @@ test("structured story-pack decisions are bounded when projected into legacy sec
           version: "3.0.0",
           analysisTier: "deep",
           deepAnalysis: {
-            executiveSynthesis: finding,
-            decisionReview: [finding],
-            frictionAndRecovery: [],
-            engineeringPatterns: [],
-            risksAndEvidenceGaps: [],
-            nextBuildActions: [],
+            openingLine: finding,
+            signatureMoves: [finding],
+            byTheNumbers: storyPack.signals[0] ? [{ ...finding, signalId: storyPack.signals[0].id }] : [],
+            whereItGotHard: [],
             chapterChanges: [],
             coverage: {
               sessionsSeen: sourceSnapshot.sessions.length,

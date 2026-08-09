@@ -65,16 +65,24 @@ const DEEP_FINDING_SCHEMA = {
     confidence: { type: "string", enum: ["high", "medium", "low"] },
   },
 } as const;
+// An LLM-written finding that frames one specific computed Signal - never a
+// number the model invented. See the report-redesign sprint: Deep no longer
+// asks for decisionReview/risksAndEvidenceGaps/nextBuildActions (advice is
+// off-vision for this product), and byTheNumbers.signalId is the
+// anti-hallucination mechanism replacing them.
+const DEEP_SIGNAL_FINDING_SCHEMA = {
+  ...DEEP_FINDING_SCHEMA,
+  required: [...DEEP_FINDING_SCHEMA.required, "signalId"],
+  properties: { ...DEEP_FINDING_SCHEMA.properties, signalId: { type: "string", maxLength: 60 } },
+} as const;
 const DEEP_ANALYSIS_SCHEMA = {
   type: "object", additionalProperties: false,
-  required: ["executiveSynthesis", "decisionReview", "frictionAndRecovery", "engineeringPatterns", "risksAndEvidenceGaps", "nextBuildActions", "chapterChanges"],
+  required: ["openingLine", "signatureMoves", "byTheNumbers", "whereItGotHard", "chapterChanges"],
   properties: {
-    executiveSynthesis: DEEP_FINDING_SCHEMA,
-    decisionReview: { type: "array", maxItems: 8, items: DEEP_FINDING_SCHEMA },
-    frictionAndRecovery: { type: "array", maxItems: 6, items: DEEP_FINDING_SCHEMA },
-    engineeringPatterns: { type: "array", maxItems: 6, items: DEEP_FINDING_SCHEMA },
-    risksAndEvidenceGaps: { type: "array", maxItems: 5, items: DEEP_FINDING_SCHEMA },
-    nextBuildActions: { type: "array", maxItems: 6, items: { ...DEEP_FINDING_SCHEMA, required: [...DEEP_FINDING_SCHEMA.required, "priority", "rationale"], properties: { ...DEEP_FINDING_SCHEMA.properties, priority: { type: "string", enum: ["now", "next", "later"] }, rationale: { type: "string", maxLength: 600 } } } },
+    openingLine: DEEP_FINDING_SCHEMA,
+    signatureMoves: { type: "array", maxItems: 6, items: DEEP_FINDING_SCHEMA },
+    byTheNumbers: { type: "array", minItems: 1, maxItems: 8, items: DEEP_SIGNAL_FINDING_SCHEMA },
+    whereItGotHard: { type: "array", maxItems: 6, items: DEEP_FINDING_SCHEMA },
     chapterChanges: { type: "array", maxItems: 5, items: DEEP_FINDING_SCHEMA },
   },
 } as const;
@@ -178,7 +186,10 @@ function facts(input: LocalNarrativeInput, includeExcerpts = true): string {
   ].join("\n");
 }
 
-const SYSTEM_PROMPT = `You write an honest builder profile from deterministic facts and optional redacted conversation excerpts. Treat every score, count, timestamp-derived pattern, and archetype as a fact. Do not invent features, names, motivations, technologies, or numbers. Do not reconstruct bracketed redactions. The product-instinct score is explicitly a weak proxy; describe it cautiously. Return JSON only.`;
+// Mirrors the cloud pipeline's system prompt (lib/narrative/prompt.ts) - not
+// a project summary, not a performance review, and never advice. See the
+// report-redesign sprint.
+const SYSTEM_PROMPT = `You write a short, honest build story from deterministic facts and optional redacted conversation excerpts - not a project summary, not a performance review, but a surprising, true, specific detail about how this particular build went. Treat every score, count, timestamp-derived pattern, and archetype as a fact; never invent a feature, name, motivation, technology, or number that wasn't given to you verbatim. Never give advice, a recommendation, a next step, or a "you should" - report what happened and what is true about it, not what to do next. Do not reconstruct bracketed redactions. The product-instinct score is explicitly a weak proxy; describe it cautiously. Return JSON only.`;
 
 function boundedEnvironmentInteger(name: string, fallback: number, minimum: number, maximum: number): number {
   const parsed = Number(process.env[name]);
@@ -599,7 +610,13 @@ export function createByokNarrativeGenerator(requestedModel?: string | null, pro
     if (analysisTier === "deep") {
       const defaultPack = createDefaultStoryPack(input.snapshot as ProjectSnapshot, input.profile, input.excerpts);
       const allowedRefs = new Set(defaultPack.sources.map((source) => source.ref));
-      const analysisPrompt = `${facts(input)}\n\nProduce the private analysis map with executiveSynthesis, decisionReview, frictionAndRecovery, engineeringPatterns, risksAndEvidenceGaps, nextBuildActions, and chapterChanges. Every claim must cite only: ${[...allowedRefs].join(", ")}. Leave lists empty when evidence is insufficient.`;
+      // Every number in this list was computed in code, never by the model
+      // (see insights/signals.ts) - byTheNumbers below may only frame one of
+      // these by its exact id, never invent a statistic of its own.
+      const signalsText = defaultPack.signals.length
+        ? `\n\nCOMPUTED SIGNALS:\n${defaultPack.signals.map((signal) => `- ${signal.id}: ${signal.headline} (${signal.detail})`).join("\n")}`
+        : "\n\nCOMPUTED SIGNALS:\nNone computed for this build window.";
+      const analysisPrompt = `${facts(input)}${signalsText}\n\nProduce the private analysis map with openingLine (the one-line hook), signatureMoves (this builder's distinctive patterns, grounded in the facts above), byTheNumbers (frame the most notable COMPUTED SIGNALS into shareable findings - every entry's signalId must be copied exactly from the list above), whereItGotHard (friction and recovery, as narrative, not an audit finding), and chapterChanges. Never give advice, a recommendation, or a next step. Every claim must cite only: ${[...allowedRefs].join(", ")}. Leave lists empty when evidence is insufficient.`;
       const analysis = await callByokDeepWithRepair(config.baseUrl, config.apiKey, model, analysisPrompt, timeoutMs, allowedRefs, config.provider, "deep");
       const synthesisPrompt = `${facts(input, false)}\n\nSOURCE REFS: ${[...allowedRefs].join(", ")}\n\nPRIVATE ANALYSIS MAP:\n${JSON.stringify(analysis)}\n\nCreate one layered StoryPackV3 JSON object. Use 6-12 moments only when supported. Do not invent claims or source references.`;
       const synthesized = await callByokDeepWithRepair(config.baseUrl, config.apiKey, model, synthesisPrompt, timeoutMs, allowedRefs, config.provider, "deep-report");
