@@ -337,6 +337,7 @@ test("the Ollama generator uses only loopback HTTP and splits narrative/profile 
   const originalFetch = globalThis.fetch;
   const originalBaseUrl = process.env.BUILDSTORY_OLLAMA_BASE_URL;
   const requests: Array<{ url: string; body: string }> = [];
+  const progressStages: string[] = [];
   let completionCalls = 0;
   process.env.BUILDSTORY_OLLAMA_BASE_URL = "http://127.0.0.1:11434";
   globalThis.fetch = (async (input, init) => {
@@ -371,6 +372,7 @@ test("the Ollama generator uses only loopback HTTP and splits narrative/profile 
       until: "2026-08-04T00:00:00Z",
       narrative: { mode: "local" },
       narrativeGenerator: createOllamaNarrativeGenerator(),
+      onProgress: (event) => progressStages.push(`${event.stage}:${event.state}`),
     });
     assert.equal(snapshot.narrativeEvidence, undefined);
     assert.equal(snapshot.generatedNarrative?.model, "gemma4:12b");
@@ -385,6 +387,17 @@ test("the Ollama generator uses only loopback HTTP and splits narrative/profile 
     assert.equal(requestBody.format?.type, "object");
     assert.equal(requestBody.options?.num_ctx, 32_768);
     assert.equal(requestBody.options?.num_predict, 2_000);
+    assert.deepEqual(
+      progressStages.filter((stage) => /^(resolving-model|generating-story|generating-insights):/.test(stage)),
+      [
+        "resolving-model:start",
+        "resolving-model:complete",
+        "generating-story:start",
+        "generating-story:complete",
+        "generating-insights:start",
+        "generating-insights:complete",
+      ],
+    );
     assert.equal(requests.some((request) => request.body.includes("/Users/")), false);
     assert.doesNotMatch(snapshot.generatedNarrative?.sections.turningPoint ?? "", /app\/api\/route\.ts|secret\.example\.invalid/);
   } finally {

@@ -520,6 +520,7 @@ async function runNarrativeGeneration(
   const profilePrompt = `${facts(input)}\n\nAvailable source refs: ${sourceRefs || "none"}, GIT when present. Return JSON only with decisions [{title,rationale,outcome,sourceRefs}], learnings [{title,detail,sourceRefs}], standoutTraits [{title,detail,sourceRefs}], and growthEdge {title,observation,nextStep,sourceRefs}. Use only available source refs.`;
   let narrativeValue: unknown = {};
   let profileValue: unknown = {};
+  input.onProgress?.({ stage: "generating-story", state: "start", model, message: "Generating story components (1/2)." });
   try {
     narrativeValue = await callComponentWithRepair(narrativePrompt, sourceRefSet, "story");
     input.onProgress?.({ stage: "generating-story", state: "complete", model, message: "Story components generated (1/2)." });
