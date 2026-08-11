@@ -206,7 +206,7 @@ function refIssues(value: unknown, path: string, allowed: Set<string>): string[]
   return errors;
 }
 
-export function validateStoryPackComponent(value: unknown, component: StoryPackComponent, allowedRefs: Set<string>): StoryPackValidation {
+export function validateStoryPackComponent(value: unknown, component: StoryPackComponent, allowedRefs: Set<string>, options: { allowMissingStandoutTraits?: boolean } = {}): StoryPackValidation {
   const candidate = objectValue(value);
   if (!candidate) return { ok: false, errors: ["response must be a JSON object."] };
   // Older local models may still answer with the flat V1 keys. The caller
@@ -255,6 +255,7 @@ export function validateStoryPackComponent(value: unknown, component: StoryPackC
       errors.push(...refIssues(item.sourceRefs, `${path}.sourceRefs`, allowedRefs));
     });
     for (const name of ["learnings", "standoutTraits"] as const) {
+      if (name === "standoutTraits" && options.allowMissingStandoutTraits && candidate[name] === undefined) continue;
       errors.push(...listIssues(candidate[name], name, 2, 4));
       if (Array.isArray(candidate[name])) candidate[name].forEach((entry, index) => {
         const item = objectValue(entry); const path = `${name}[${index}]`;
@@ -491,7 +492,7 @@ export function sanitizeStoryPack(
     version: "3.0.0",
     analysisTier: "deep",
     deepAnalysis: {
-      openingLine: finding("deepAnalysis.openingLine", deep.openingLine, storyPack.hero.headline, storyPack.hero.summary),
+      openingLine: finding("deepAnalysis.openingLine", deep.openingLine),
       signatureMoves: findings("deepAnalysis.signatureMoves", deep.signatureMoves, 6),
       byTheNumbers,
       whereItGotHard: findings("deepAnalysis.whereItGotHard", deep.whereItGotHard, 6),

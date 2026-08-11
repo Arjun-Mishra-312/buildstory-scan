@@ -88,7 +88,7 @@ const DEEP_ANALYSIS_SCHEMA = {
 } as const;
 const DEEP_REPORT_SCHEMA = {
   type: "object", additionalProperties: false,
-  required: [...STORY_PACK_STORY_SCHEMA.required, ...STORY_PACK_INSIGHTS_SCHEMA.required, "deepAnalysis"],
+  required: [...STORY_PACK_STORY_SCHEMA.required, "decisions", "learnings", "growthEdge"],
   properties: { ...STORY_PACK_STORY_SCHEMA.properties, ...STORY_PACK_INSIGHTS_SCHEMA.properties, deepAnalysis: DEEP_ANALYSIS_SCHEMA },
 } as const;
 type ByokComponent = StoryPackComponent | "deep" | "deep-report";
@@ -413,16 +413,15 @@ async function callByokDeepWithRepair(baseUrl: string, apiKey: string, model: st
     const value = await callByok(baseUrl, apiKey, model, currentPrompt, timeoutMs, component, provider, "deep");
     const invalid = unknownSourceRefs(value, allowedRefs);
     const objectValue = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
-    // Deep-report additionally runs the real field-level validator (title
-    // lengths, sourceRefs provenance, cardinality) against its story and
-    // insights portions - previously nothing beyond "deepAnalysis exists as
-    // an object" was ever checked here.
+    // Deep-report runs the real field-level validator (title lengths,
+    // sourceRefs provenance, cardinality) against its story and insights
+    // portions. The pass-1 analysis map is composed server-side, so pass 2
+    // does not need to return a second copy of deepAnalysis or standoutTraits.
     const shapeOk = component === "deep"
       ? matchesRequiredShape(value, DEEP_ANALYSIS_SCHEMA)
       : objectValue !== null
-        && matchesRequiredShape(objectValue.deepAnalysis, DEEP_ANALYSIS_SCHEMA)
         && validateStoryPackComponent(objectValue, "story", allowedRefs).ok
-        && validateStoryPackComponent(objectValue, "insights", allowedRefs).ok;
+        && validateStoryPackComponent(objectValue, "insights", allowedRefs, { allowMissingStandoutTraits: true }).ok;
     if (!invalid.length && shapeOk) return value;
     if (attempt === 1) throw new LocalNarrativeGenerationError("local_provider_invalid_response", "The configured provider returned invalid deep analysis after repair.");
     currentPrompt = `${prompt}\nValidation feedback: use only these source references: ${[...allowedRefs].join(", ")}. Return one JSON object and no prose.`;
@@ -617,18 +616,17 @@ export function createByokNarrativeGenerator(requestedModel?: string | null, pro
       const signalsText = defaultPack.signals.length
         ? `\n\nCOMPUTED SIGNALS:\n${defaultPack.signals.map((signal) => `- ${signal.id}: ${signal.headline} (${signal.detail})`).join("\n")}`
         : "\n\nCOMPUTED SIGNALS:\nNone computed for this build window.";
-      const analysisPrompt = `${facts(input)}${signalsText}\n\nProduce the private analysis map with openingLine (the one-line hook), signatureMoves (this builder's distinctive patterns, grounded in the facts above), byTheNumbers (frame the most notable COMPUTED SIGNALS into shareable findings - every entry's signalId must be copied exactly from the list above), whereItGotHard (friction and recovery, as narrative, not an audit finding), and chapterChanges. Never give advice, a recommendation, or a next step. Every claim must cite only: ${[...allowedRefs].join(", ")}. Leave lists empty when evidence is insufficient.`;
+      const analysisPrompt = `${facts(input)}${signalsText}\n\nProduce the private analysis map with openingLine (the one-line hook), signatureMoves (this builder's distinctive patterns, grounded in the facts above), byTheNumbers (frame the most notable COMPUTED SIGNALS into shareable findings - every entry's signalId must be copied exactly from the list above), whereItGotHard (friction and recovery, as narrative, not an audit finding), and chapterChanges. Each list answers a different question; do not restate the same event across signatureMoves, whereItGotHard, and byTheNumbers. Never give advice, a recommendation, or a next step. Every claim must cite only: ${[...allowedRefs].join(", ")}. Leave lists empty when evidence is insufficient.`;
       const analysis = await callByokDeepWithRepair(config.baseUrl, config.apiKey, model, analysisPrompt, timeoutMs, allowedRefs, config.provider, "deep");
-      const synthesisPrompt = `${facts(input, false)}\n\nSOURCE REFS: ${[...allowedRefs].join(", ")}\n\nPRIVATE ANALYSIS MAP:\n${JSON.stringify(analysis)}\n\nCreate one layered StoryPackV3 JSON object. Use 6-12 moments only when supported. Do not invent claims or source references.`;
+      const synthesisPrompt = `${facts(input, false)}\n\nSOURCE REFS: ${[...allowedRefs].join(", ")}\n\nPRIVATE ANALYSIS MAP:\n${JSON.stringify(analysis)}\n\nCreate one layered StoryPackV3 JSON object. Do not restate signatureMoves as standoutTraits; do not restate whereItGotHard as moments - choose delivery or discovery moments instead. Do not reuse openingLine.title in hero.headline, and make turningPoint a distinct inflection from whereItGotHard. Do not output standoutTraits or deepAnalysis; Buildstory will derive or attach those from the validated analysis map. Use 6-12 moments only when supported. Do not invent claims or source references.`;
       const synthesized = await callByokDeepWithRepair(config.baseUrl, config.apiKey, model, synthesisPrompt, timeoutMs, allowedRefs, config.provider, "deep-report");
       const candidate = synthesized && typeof synthesized === "object" && !Array.isArray(synthesized) ? synthesized as Record<string, unknown> : {};
-      const deep = candidate.deepAnalysis && typeof candidate.deepAnalysis === "object" && !Array.isArray(candidate.deepAnalysis) ? candidate.deepAnalysis as Record<string, unknown> : analysis as Record<string, unknown>;
       const withCoverage = {
         ...candidate,
         version: "3.0.0",
         analysisTier: "deep",
         deepAnalysis: {
-          ...deep,
+          ...(analysis && typeof analysis === "object" && !Array.isArray(analysis) ? analysis as Record<string, unknown> : {}),
           coverage: {
             sessionsSeen: input.snapshot.sessions.length,
             excerptsUsed: input.excerpts.length,
