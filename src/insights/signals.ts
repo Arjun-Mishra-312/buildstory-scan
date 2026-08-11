@@ -250,22 +250,15 @@ function spendSignals(inputs: SignalInputs): Signal[] {
   const signals: Signal[] = [];
 
   const tokenUsage = usage.tokenUsage;
-  if (tokenUsage) {
-    // Providers report uncached input, cache reads, and cache writes as
-    // separate buckets. The old denominator used only inputTokens, which
-    // could produce impossible percentages (for example 3,171%).
-    const cacheReadInputTokens = Math.max(tokenUsage.cachedInputTokens ?? 0, tokenUsage.cacheReadInputTokens ?? 0);
-    const cacheCreationInputTokens = tokenUsage.cacheCreationInputTokens
-      ?? ((tokenUsage.cacheCreation1hInputTokens ?? 0) + (tokenUsage.cacheCreation5mInputTokens ?? 0));
-    const inputFootprint = Math.max(0, tokenUsage.inputTokens) + cacheReadInputTokens + cacheCreationInputTokens;
-    const cacheHitShare = pct(cacheReadInputTokens, inputFootprint);
-    if (cacheHitShare >= 20 && cacheReadInputTokens > 0) {
+  if (tokenUsage && tokenUsage.inputTokens > 0) {
+    const cacheHitShare = pct(tokenUsage.cachedInputTokens, tokenUsage.inputTokens);
+    if (cacheHitShare >= 20) {
       signals.push({
         id: "cache-hit-ratio", family: "spend",
-        headline: `${cacheHitShare}% of your input footprint was served from cache`,
-        detail: `${cacheReadInputTokens.toLocaleString("en-US")} cached reads across ${inputFootprint.toLocaleString("en-US")} input tokens and cache writes.`,
+        headline: `${cacheHitShare}% of your input tokens were served from cache`,
+        detail: `${tokenUsage.cachedInputTokens.toLocaleString("en-US")} of ${tokenUsage.inputTokens.toLocaleString("en-US")} input tokens.`,
         value: cacheHitShare, unit: "%", notability: Math.min(100, Math.round(cacheHitShare * 1.1)),
-        formula: "round(100 * cacheReadInputTokens / (inputTokens + cacheReadInputTokens + cacheCreationInputTokens))",
+        formula: "round(100 * cachedInputTokens / inputTokens)",
         sourceRefs: [],
       });
     }
