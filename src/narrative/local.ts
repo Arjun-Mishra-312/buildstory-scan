@@ -265,9 +265,8 @@ async function callOllama(
 /**
  * BYOK's OpenAI-compatible counterpart to callOllama: same shape of request
  * (system + user message, schema-constrained JSON response, one component
- * per call), but POSTs to {baseUrl}/chat/completions with a bearer key and
- * the OpenAI-style `response_format: {type:"json_schema",...}` wrapper
- * instead of Ollama's raw `format` schema field. The prompt, the excerpts it
+ * per call). OpenRouter uses Chat Completions; OpenAI uses the Responses API
+ * with `text.format` structured output. The prompt, the excerpts it
  * contains, and the redaction/sanitization applied to the response are
  * identical to the Ollama path - only the wire format differs.
  */
@@ -286,10 +285,25 @@ async function callByok(
   try {
     let response: Response;
     try {
-      response = await fetch(`${baseUrl}/chat/completions`, {
+      const schema = {
+        name: component === "story" ? "buildstory_story" : component === "insights" ? "buildstory_insights" : component === "deep" ? "buildstory_deep_analysis" : "buildstory_deep_report",
+        strict: true,
+        schema: component === "story" ? STORY_PACK_STORY_SCHEMA : component === "insights" ? STORY_PACK_INSIGHTS_SCHEMA : component === "deep" ? DEEP_ANALYSIS_SCHEMA : DEEP_REPORT_SCHEMA,
+      };
+      response = await fetch(`${baseUrl}/${provider === "openai" ? "responses" : "chat/completions"}`, {
         method: "POST",
         headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
-        body: JSON.stringify({
+        body: JSON.stringify(provider === "openai" ? {
+          model,
+          input: [
+            { role: "system", content: SYSTEM_PROMPT },
+            { role: "user", content: prompt },
+          ],
+          text: { format: { type: "json_schema", ...schema } },
+          reasoning: { effort: analysisTier === "deep" ? "high" : "medium" },
+          store: false,
+          max_output_tokens: analysisTier === "deep" ? 40_000 : 4_000,
+        } : {
           model,
           messages: [
             { role: "system", content: SYSTEM_PROMPT },
@@ -298,15 +312,11 @@ async function callByok(
           response_format: {
             type: "json_schema",
             json_schema: {
-              name: component === "story" ? "buildstory_story" : component === "insights" ? "buildstory_insights" : component === "deep" ? "buildstory_deep_analysis" : "buildstory_deep_report",
-              strict: true,
-              schema: component === "story" ? STORY_PACK_STORY_SCHEMA : component === "insights" ? STORY_PACK_INSIGHTS_SCHEMA : component === "deep" ? DEEP_ANALYSIS_SCHEMA : DEEP_REPORT_SCHEMA,
+              ...schema,
             },
           },
-          ...(provider === "openrouter" ? {
-            provider: { zdr: true, data_collection: "deny", require_parameters: true, allow_fallbacks: true },
-            ...(analysisTier === "deep" ? { reasoning: { effort: "high", exclude: true } } : {}),
-          } : { store: false }),
+          provider: { zdr: true, data_collection: "deny", require_parameters: true, allow_fallbacks: true },
+          ...(analysisTier === "deep" ? { reasoning: { effort: "high", exclude: true } } : {}),
           max_tokens: analysisTier === "deep" ? 40_000 : 4_000,
         }),
         signal: controller.signal,
@@ -320,8 +330,14 @@ async function callByok(
     if (!response.ok) {
       throw new LocalNarrativeGenerationError("local_provider_request_failed", `The configured model provider returned HTTP ${response.status} while generating ${component} components.`);
     }
-    const payload = await response.json().catch(() => null) as { choices?: Array<{ message?: { content?: unknown } }> } | null;
-    const content = payload?.choices?.[0]?.message?.content;
+    const payload = await response.json().catch(() => null) as {
+      choices?: Array<{ message?: { content?: unknown } }>;
+      output_text?: unknown;
+      output?: Array<{ content?: Array<{ type?: string; text?: unknown }> }>;
+    } | null;
+    const content = payload?.choices?.[0]?.message?.content
+      ?? payload?.output_text
+      ?? payload?.output?.flatMap((item) => item.content ?? []).find((item) => item.type === "output_text")?.text;
     if (typeof content !== "string") throw new LocalNarrativeGenerationError("local_provider_invalid_response", "The configured model provider returned no JSON content.");
     const parsed = extractJson(content);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new LocalNarrativeGenerationError("local_provider_invalid_response", "The configured model provider returned invalid JSON.");

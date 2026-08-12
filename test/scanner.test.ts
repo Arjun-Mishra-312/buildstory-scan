@@ -8,7 +8,14 @@ import { writeSnapshotFile } from "../src/output.js";
 import { aggregateUsage, buildProjectSnapshot, inspectSelectedRepository } from "../src/scanner.js";
 import type { ProviderSession } from "../src/sources/types.js";
 import { validateProjectSnapshot } from "../src/validation.js";
+import { parseGitAiStats } from "../src/repository.js";
 import { createLocalFixture } from "./helpers.js";
+
+test("Git AI opt-in import keeps only content-free attribution aggregates", () => {
+  const parsed = parseGitAiStats(JSON.stringify({ human_additions: 28, ai_additions: 76, ai_accepted: 47, tool_model_breakdown: { "claude_code/claude-sonnet": { ai_additions: 76, ai_accepted: 47 } }, transcript_url: "https://private.invalid", prompt: "secret" }));
+  assert.deepEqual(parsed, { source: "git-ai", optIn: true, humanAdditions: 28, aiAdditions: 76, aiAccepted: 47, toolModels: [{ tool: "claude_code", model: "claude-sonnet", aiAdditions: 76, aiAccepted: 47 }] });
+  assert.doesNotMatch(JSON.stringify(parsed), /private|prompt|transcript|https/);
+});
 
 test("builds a deterministic, repository-scoped ProjectSnapshot", async () => {
   const fixture = await createLocalFixture();
@@ -30,6 +37,11 @@ test("builds a deterministic, repository-scoped ProjectSnapshot", async () => {
     assert.equal(first.sessions.length, 1);
     assert.equal(first.sessions[0]?.turns, 1);
     assert.equal(first.sessions[0]?.toolCalls, 1);
+    assert.equal(first.eventSpine?.version, "1.0.0");
+    assert.equal(first.eventSpine?.coverage.sessions, 1);
+    assert.equal(first.eventSpine?.coverage.events, first.eventSpine?.events.length);
+    assert.ok(first.eventSpine?.events.every((event) => event.privacy === "metadata-only"));
+    assert.ok(first.eventSpine?.events.every((event, index, events) => index === 0 || events[index - 1]!.occurredAt <= event.occurredAt));
     assert.deepEqual(first.sessions[0]?.toolRefs, ["shell"]);
     assert.deepEqual(first.sessions[0]?.modelRefs, ["gpt-fixture"]);
     assert.equal(first.sourceSelection.providers[0]?.filesDiscovered, 2);

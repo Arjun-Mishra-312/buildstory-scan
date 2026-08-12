@@ -7,6 +7,7 @@ export const CONSENT_STATEMENT_VERSION = "1.0" as const;
 /** Separate, additional consent for the opt-in narrativeEvidence bundle only. */
 export const NARRATIVE_EVIDENCE_CONSENT_VERSION = "1.0" as const;
 export const NARRATIVE_EVIDENCE_BUNDLE_VERSION = "1.0.0" as const;
+export const EVENT_SPINE_VERSION = "1.0.0" as const;
 
 export type IsoDateTime = string;
 export type Sha256Digest = `sha256:${string}`;
@@ -50,6 +51,12 @@ export interface ProjectSnapshot {
   provenance: Provenance;
   quality: QualitySummary;
   /**
+   * Deterministic, content-free chronology derived only from already-approved
+   * session metadata and opaque evidence references. It never contains source
+   * text, paths, URLs, commit messages, diffs, or tool arguments/results.
+   */
+  eventSpine?: EventSpine;
+  /**
    * Opt-in only: present exclusively when the creator explicitly ran the
    * excerpts flow, reviewed the exact bundle, and typed the confirmation.
    * Absent from every default scan. This is the ONLY field on
@@ -59,6 +66,49 @@ export interface ProjectSnapshot {
   narrativeEvidence?: NarrativeEvidenceBundle;
   /** Local-only prose. Cloud narratives are generated server-side and never enter the upload. */
   generatedNarrative?: GeneratedNarrative;
+}
+
+export type BuildEventKind =
+  | "session-start"
+  | "planning"
+  | "model-shift"
+  | "exploration"
+  | "mutation"
+  | "verification"
+  | "delegation"
+  | "session-outcome"
+  | "repository-milestone";
+
+export type BuildEventPhase = "discover" | "decide" | "deliver";
+
+export interface BuildEvent {
+  eventId: `evt_${string}`;
+  occurredAt: IsoDateTime;
+  kind: BuildEventKind;
+  phase: BuildEventPhase;
+  /** Fixed scanner-authored label selected from the event kind. */
+  label: string;
+  /** Opaque session reference; absent for repository-wide milestones. */
+  sessionRef?: string;
+  provider?: ProviderId | "git";
+  /** Count attached to the event (turns, calls, models, or invocations). */
+  magnitude: number;
+  measurement: "turns" | "distinct-tools" | "models" | "invocations" | "status" | "milestone";
+  /** Session aggregates do not reveal the exact instant of an inner event. */
+  temporalPrecision: "exact" | "estimated";
+  sourceRefs: string[];
+  privacy: "metadata-only";
+}
+
+export interface EventSpine {
+  version: typeof EVENT_SPINE_VERSION;
+  generatedAt: IsoDateTime;
+  events: BuildEvent[];
+  coverage: {
+    sessions: number;
+    milestones: number;
+    events: number;
+  };
 }
 
 export type NarrativeExcerptRole =
@@ -430,6 +480,14 @@ export interface GitAggregateMetrics {
   fileTouches: number;
   insertions: number;
   deletions: number;
+  aiAttribution?: {
+    source: "git-ai";
+    optIn: true;
+    humanAdditions: number;
+    aiAdditions: number;
+    aiAccepted: number;
+    toolModels: Array<{ tool: string; model: string; aiAdditions: number; aiAccepted: number }>;
+  };
   workingTree: {
     isDirty: boolean;
     stagedEntries: number;
@@ -529,6 +587,7 @@ export type QualityWarningCode =
   | "SESSION_ACTIVE_AT_SCAN_END"
   | "GIT_HISTORY_UNAVAILABLE"
   | "GIT_STATUS_UNAVAILABLE"
+  | "GIT_AI_ATTRIBUTION_UNAVAILABLE"
   | "NO_MATCHING_SESSIONS";
 
 export interface QualityWarning {

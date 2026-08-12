@@ -207,9 +207,20 @@ function parseShortStat(output: string): Pick<GitAggregateMetrics, "fileTouches"
   return { fileTouches, insertions, deletions };
 }
 
+export function parseGitAiStats(output: string): NonNullable<GitAggregateMetrics["aiAttribution"]> {
+  const raw = JSON.parse(output) as { human_additions?: unknown; ai_additions?: unknown; ai_accepted?: unknown; tool_model_breakdown?: Record<string, { ai_additions?: unknown; ai_accepted?: unknown }> };
+  const count = (value: unknown) => nonNegativeInteger(typeof value === "number" || typeof value === "string" ? String(value) : undefined);
+  const toolModels = Object.entries(raw.tool_model_breakdown ?? {}).map(([key, values]) => {
+    const separator = key.indexOf("/");
+    return { tool: cleanIdentifier(separator >= 0 ? key.slice(0, separator) : key, 80), model: cleanIdentifier(separator >= 0 ? key.slice(separator + 1) : "unknown", 120), aiAdditions: count(values.ai_additions), aiAccepted: count(values.ai_accepted) };
+  }).sort((left, right) => left.tool.localeCompare(right.tool) || left.model.localeCompare(right.model));
+  return { source: "git-ai", optIn: true, humanAdditions: count(raw.human_additions), aiAdditions: count(raw.ai_additions), aiAccepted: count(raw.ai_accepted), toolModels };
+}
+
 export async function collectGitMetrics(
   repository: RepositoryInspection,
   window: TimeWindow,
+  includeGitAiAttribution = false,
 ): Promise<{ metrics: GitAggregateMetrics; warnings: QualityWarning[] }> {
   const warnings: QualityWarning[] = [];
   const range = [`--since=${window.start}`, `--until=${window.end}`, "HEAD"];
@@ -268,6 +279,16 @@ export async function collectGitMetrics(
       .map((value) => sha256(value)),
   );
   const shortStat = parseShortStat(statOutput ?? "");
+  let aiAttribution: GitAggregateMetrics["aiAttribution"];
+  if (includeGitAiAttribution) {
+    try {
+      const result = await execFileAsync("git-ai", ["stats", "--json"], { cwd: repository.rootPath, encoding: "utf8", maxBuffer: 2 * 1024 * 1024, windowsHide: true });
+      aiAttribution = parseGitAiStats(result.stdout);
+      repository.commands.add("git-ai-stats");
+    } catch {
+      warnings.push({ code: "GIT_AI_ATTRIBUTION_UNAVAILABLE", severity: "info", message: "Git AI attribution was requested but content-free stats were unavailable." });
+    }
+  }
 
   return {
     metrics: {
@@ -275,6 +296,7 @@ export async function collectGitMetrics(
       mergeCommits: nonNegativeInteger(mergeOutput?.trim()),
       contributors: contributorDigests.size,
       ...shortStat,
+      ...(aiAttribution ? { aiAttribution } : {}),
       workingTree,
     },
     warnings,

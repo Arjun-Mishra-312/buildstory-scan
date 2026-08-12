@@ -45,6 +45,7 @@
     "redaction": { "$ref": "#/$defs/redaction" },
     "provenance": { "$ref": "#/$defs/provenance" },
     "quality": { "$ref": "#/$defs/quality" },
+    "eventSpine": { "$ref": "#/$defs/eventSpine" },
     "narrativeEvidence": { "$ref": "#/$defs/narrativeEvidence" },
     "generatedNarrative": { "$ref": "#/$defs/generatedNarrative" }
   },
@@ -57,6 +58,52 @@
       "type": "integer",
       "minimum": 0,
       "maximum": 9007199254740991
+    },
+    "eventSpine": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "generatedAt", "events", "coverage"],
+      "properties": {
+        "version": { "const": "1.0.0" },
+        "generatedAt": { "$ref": "#/$defs/dateTime" },
+        "events": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/buildEvent" }
+        },
+        "coverage": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["sessions", "milestones", "events"],
+          "properties": {
+            "sessions": { "$ref": "#/$defs/nonNegativeInteger" },
+            "milestones": { "$ref": "#/$defs/nonNegativeInteger" },
+            "events": { "$ref": "#/$defs/nonNegativeInteger" }
+          }
+        }
+      }
+    },
+    "buildEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["eventId", "occurredAt", "kind", "phase", "label", "magnitude", "measurement", "temporalPrecision", "sourceRefs", "privacy"],
+      "properties": {
+        "eventId": { "type": "string", "pattern": "^evt_[a-f0-9]{20}$" },
+        "occurredAt": { "$ref": "#/$defs/dateTime" },
+        "kind": { "enum": ["session-start", "planning", "model-shift", "exploration", "mutation", "verification", "delegation", "session-outcome", "repository-milestone"] },
+        "phase": { "enum": ["discover", "decide", "deliver"] },
+        "label": { "enum": ["Session opened", "Plan-first work", "Model context changed", "Exploration tools observed", "Build tools observed", "Verification tools observed", "Subagent work delegated", "Session closed", "Repository milestone"] },
+        "sessionRef": { "type": "string", "pattern": "^ses_[a-f0-9]{20}$" },
+        "provider": { "enum": ["codex", "claude-code", "gemini-antigravity", "cursor", "git"] },
+        "magnitude": { "$ref": "#/$defs/nonNegativeInteger" },
+        "measurement": { "enum": ["turns", "distinct-tools", "models", "invocations", "status", "milestone"] },
+        "temporalPrecision": { "enum": ["exact", "estimated"] },
+        "sourceRefs": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^ev_[a-f0-9]{20}$" }
+        },
+        "privacy": { "const": "metadata-only" }
+      }
     },
     "sha256": {
       "type": "string",
@@ -326,6 +373,15 @@
         "fileTouches": { "$ref": "#/$defs/nonNegativeInteger" },
         "insertions": { "$ref": "#/$defs/nonNegativeInteger" },
         "deletions": { "$ref": "#/$defs/nonNegativeInteger" },
+        "aiAttribution": {
+          "type": "object", "additionalProperties": false,
+          "required": ["source", "optIn", "humanAdditions", "aiAdditions", "aiAccepted", "toolModels"],
+          "properties": {
+            "source": { "const": "git-ai" }, "optIn": { "const": true },
+            "humanAdditions": { "$ref": "#/$defs/nonNegativeInteger" }, "aiAdditions": { "$ref": "#/$defs/nonNegativeInteger" }, "aiAccepted": { "$ref": "#/$defs/nonNegativeInteger" },
+            "toolModels": { "type": "array", "items": { "type": "object", "additionalProperties": false, "required": ["tool", "model", "aiAdditions", "aiAccepted"], "properties": { "tool": { "type": "string", "minLength": 1, "maxLength": 80 }, "model": { "type": "string", "minLength": 1, "maxLength": 120 }, "aiAdditions": { "$ref": "#/$defs/nonNegativeInteger" }, "aiAccepted": { "$ref": "#/$defs/nonNegativeInteger" } } } }
+          }
+        },
         "workingTree": {
           "type": "object",
           "additionalProperties": false,
@@ -431,7 +487,7 @@
         "repositoryCommands": {
           "type": "array",
           "uniqueItems": true,
-          "items": { "enum": ["git-config", "git-log-shortstat", "git-rev-list", "git-rev-parse", "git-show", "git-status"] }
+          "items": { "enum": ["git-ai-stats", "git-config", "git-log-shortstat", "git-rev-list", "git-rev-parse", "git-show", "git-status"] }
         },
         "sourceFilesConsidered": { "$ref": "#/$defs/nonNegativeInteger" },
         "sourceFilesParsed": { "$ref": "#/$defs/nonNegativeInteger" },
@@ -443,7 +499,7 @@
       "additionalProperties": false,
       "required": ["code", "severity", "message"],
       "properties": {
-        "code": { "enum": ["CODEX_ROOT_UNAVAILABLE", "CLAUDE_CODE_ROOT_UNAVAILABLE", "GEMINI_ANTIGRAVITY_ROOT_UNAVAILABLE", "CURSOR_ROOT_UNAVAILABLE", "PROVIDER_FORMAT_UNVERIFIED", "PROVIDER_SCOPE_UNKNOWN", "SESSION_FILE_LIMIT_REACHED", "SESSION_FILE_TOO_LARGE", "SESSION_LINE_TOO_LARGE", "SESSION_LINE_INVALID_JSON", "SESSION_MISSING_METADATA", "SESSION_TIMESTAMP_INVALID", "SESSION_MODEL_UNKNOWN", "SESSION_ACTIVE_AT_SCAN_END", "GIT_HISTORY_UNAVAILABLE", "GIT_STATUS_UNAVAILABLE", "NO_MATCHING_SESSIONS"] },
+        "code": { "enum": ["CODEX_ROOT_UNAVAILABLE", "CLAUDE_CODE_ROOT_UNAVAILABLE", "GEMINI_ANTIGRAVITY_ROOT_UNAVAILABLE", "CURSOR_ROOT_UNAVAILABLE", "PROVIDER_FORMAT_UNVERIFIED", "PROVIDER_SCOPE_UNKNOWN", "SESSION_FILE_LIMIT_REACHED", "SESSION_FILE_TOO_LARGE", "SESSION_LINE_TOO_LARGE", "SESSION_LINE_INVALID_JSON", "SESSION_MISSING_METADATA", "SESSION_TIMESTAMP_INVALID", "SESSION_MODEL_UNKNOWN", "SESSION_ACTIVE_AT_SCAN_END", "GIT_HISTORY_UNAVAILABLE", "GIT_STATUS_UNAVAILABLE", "GIT_AI_ATTRIBUTION_UNAVAILABLE", "NO_MATCHING_SESSIONS"] },
         "severity": { "enum": ["info", "warning"] },
         "message": { "type": "string", "minLength": 1, "maxLength": 300 },
         "sessionRef": { "type": "string", "pattern": "^ses_[a-f0-9]{20}$" }

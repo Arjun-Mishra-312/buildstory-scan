@@ -524,7 +524,7 @@ test("the OpenAI BYOK preset uses its provider-specific key and store false with
     const value = requests.length === 1
       ? { headline: "OpenAI BYOK", narrative: "Generated locally through the user's key.", turningPoint: "Review completed.", learnings: ["Keep keys local."] }
       : { decisionPatterns: ["Review before shipping."], standoutTraits: ["Protects privacy."], growthEdge: "Collect more evidence." };
-    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(value) } }] }), { status: 200 });
+    return new Response(JSON.stringify({ output_text: JSON.stringify(value) }), { status: 200 });
   }) as typeof fetch;
   try {
     const snapshot = await buildProjectSnapshot({
@@ -533,9 +533,10 @@ test("the OpenAI BYOK preset uses its provider-specific key and store false with
       narrativeGenerator: createByokNarrativeGenerator("gpt-5.6-luna", "openai", "standard"),
     });
     assert.equal(snapshot.generatedNarrative?.provider, "openai");
-    assert.ok(requests.every((request) => request.url === "https://api.openai.com/v1/chat/completions"));
+    assert.ok(requests.every((request) => request.url === "https://api.openai.com/v1/responses"));
     assert.ok(requests.every((request) => request.authorization === "Bearer sk-openai-fixture-key"));
-    assert.ok(requests.every((request) => request.body.store === false && request.body.provider === undefined));
+    assert.ok(requests.every((request) => request.body.store === false && request.body.provider === undefined && request.body.input !== undefined));
+    assert.ok(requests.every((request) => request.body.text !== undefined && request.body.response_format === undefined && request.body.messages === undefined));
   } finally {
     globalThis.fetch = originalFetch;
     if (originalKey === undefined) delete process.env.BUILDSTORY_OPENAI_API_KEY; else process.env.BUILDSTORY_OPENAI_API_KEY = originalKey;

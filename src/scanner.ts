@@ -34,6 +34,7 @@ import {
 import { createAdapters, defaultProviderIds, isRegisteredProvider } from "./sources/registry.js";
 import type { ProviderDiscoveryResult, ProviderSession, RawExcerptCandidate, SessionProviderAdapter } from "./sources/types.js";
 import { validateProjectSnapshot } from "./validation.js";
+import { buildEventSpine } from "./insights/event-spine.js";
 import { computeBuilderProfile, defaultProfileNarrative } from "./insights/profile.js";
 import type { LocalNarrativeGenerator, LocalNarrativeInput } from "./narrative/local.js";
 import type { ScanProgressReporter } from "./progress.js";
@@ -88,6 +89,8 @@ export interface ScanOptions {
   beforeNarrativeGeneration?: (input: Pick<LocalNarrativeInput, "snapshot" | "profile" | "excerpts">) => Promise<void> | void;
   /** Content-free lifecycle events for CLI/UI progress rendering. */
   onProgress?: ScanProgressReporter;
+  /** Explicit opt-in to content-free attribution aggregates from `git-ai stats --json`. */
+  includeGitAiAttribution?: boolean;
 }
 
 function reportProgress(options: Pick<ScanOptions, "onProgress">, event: Parameters<NonNullable<ScanOptions["onProgress"]>>[0]): void {
@@ -546,7 +549,7 @@ export async function buildProjectSnapshot(options: ScanOptions): Promise<Projec
   const includedSessions = allSessions.filter((session) => intersectsWindow(session, timeWindow));
   const includedSessionRefs = new Set(includedSessions.map((session) => session.summary.sessionRef));
   reportProgress(options, { stage: "aggregating-metrics", state: "start", message: "Aggregating Git history and usage metrics." });
-  const gitResult = await collectGitMetrics(repository, timeWindow);
+  const gitResult = await collectGitMetrics(repository, timeWindow, options.includeGitAiAttribution ?? false);
   const { usage, partiallyPricedModels } = aggregateUsage(includedSessions);
   reportProgress(options, {
     stage: "aggregating-metrics",
@@ -666,6 +669,16 @@ export async function buildProjectSnapshot(options: ScanOptions): Promise<Projec
     partiallyPricedModels,
   };
 
+  const orderedSessions = includedSessions
+    .slice()
+    .sort((left, right) =>
+      compareStrings(left.summary.startedAt, right.summary.startedAt) ||
+      compareStrings(left.summary.sessionRef, right.summary.sessionRef),
+    )
+    .map((session) => session.summary);
+  const orderedMilestones = milestones.sort((left, right) => compareStrings(left.occurredAt, right.occurredAt) || compareStrings(left.milestoneId, right.milestoneId));
+  const orderedEvidence = evidence.sort((left, right) => compareStrings(left.evidenceId, right.evidenceId));
+
   const snapshotWithoutId: Omit<ProjectSnapshot, "scanId"> = {
     schemaVersion: PROJECT_SNAPSHOT_SCHEMA_VERSION,
     generatedAt: timeWindow.end,
@@ -694,17 +707,12 @@ export async function buildProjectSnapshot(options: ScanOptions): Promise<Projec
     },
     repository: repository.identity,
     timeWindow,
-    sessions: includedSessions
-      .slice()
-      .sort((left, right) =>
-        compareStrings(left.summary.startedAt, right.summary.startedAt) ||
-        compareStrings(left.summary.sessionRef, right.summary.sessionRef),
-      )
-      .map((session) => session.summary),
+    sessions: orderedSessions,
     usage: { ...usage, coverage },
     git: gitResult.metrics,
-    milestones: milestones.sort((left, right) => compareStrings(left.occurredAt, right.occurredAt) || compareStrings(left.milestoneId, right.milestoneId)),
-    evidence: evidence.sort((left, right) => compareStrings(left.evidenceId, right.evidenceId)),
+    milestones: orderedMilestones,
+    evidence: orderedEvidence,
+    eventSpine: buildEventSpine({ generatedAt: timeWindow.end, sessions: orderedSessions, milestones: orderedMilestones, evidence: orderedEvidence }),
     redaction: redactor.summary(true),
     provenance: {
       scanner: { name: SCANNER_NAME, version: SCANNER_VERSION },

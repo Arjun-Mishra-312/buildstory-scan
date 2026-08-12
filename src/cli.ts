@@ -132,6 +132,9 @@ Scanner options:
                              evidence bundle would be empty. Requires
                              --with-evidence. Without this flag, an empty
                              bundle still proceeds as a metrics-only snapshot.
+  --with-git-ai-attribution Explicitly import content-free authorship totals
+                             from an installed Git AI CLI. No notes, prompts,
+                             paths, diffs, or transcript links are retained.
   --quiet                    Suppress progress and non-error success output.
   --help                     Show this help.
   --version                  Show the scanner version.
@@ -176,6 +179,7 @@ interface ParsedScannerArguments {
   withEvidence: boolean;
   review: boolean;
   requireEvidence: boolean;
+  withGitAiAttribution: boolean;
   quiet: boolean;
 }
 
@@ -209,7 +213,7 @@ const SCANNER_VALUE_OPTIONS = new Set([
   "--upload-consent",
   "--output",
 ]);
-const SCANNER_BOOLEAN_OPTIONS = new Set(["--dry-run", "--overwrite", "--quiet", "--with-evidence", "--review", "--require-evidence"]);
+const SCANNER_BOOLEAN_OPTIONS = new Set(["--dry-run", "--overwrite", "--quiet", "--with-evidence", "--review", "--require-evidence", "--with-git-ai-attribution"]);
 const CONNECT_VALUE_OPTIONS = new Set(["--code", "--api-base-url", "--allow-host", "--timeout-ms"]);
 const CONNECT_BOOLEAN_OPTIONS = new Set(["--remote"]);
 
@@ -353,6 +357,7 @@ function parseScannerArguments(
     withEvidence: flags.has("--with-evidence"),
     review: flags.has("--review"),
     requireEvidence: flags.has("--require-evidence"),
+    withGitAiAttribution: flags.has("--with-git-ai-attribution"),
     quiet: flags.has("--quiet"),
   } as const;
   const codexHome = values.get("--codex-home");
@@ -394,7 +399,7 @@ function parseArguments(argv: string[]): ParsedArguments | "help" | "version" {
 
 function validateScannerArguments(args: ParsedScannerArguments): void {
   if (args.command === "inspect") {
-    if (args.dryRun || args.output || args.overwrite || args.consent || args.uploadConsent || args.codexHome || args.claudeCodeHome || args.cursorHome || args.antigravityHome || args.since || args.until || args.withEvidence || args.review || args.requireEvidence || args.projectName) {
+    if (args.dryRun || args.output || args.overwrite || args.consent || args.uploadConsent || args.codexHome || args.claudeCodeHome || args.cursorHome || args.antigravityHome || args.since || args.until || args.withEvidence || args.review || args.requireEvidence || args.withGitAiAttribution || args.projectName) {
       throw new ScannerError("INSPECT_OPTION_INVALID", "inspect accepts only --repo, --source, and --quiet.", 2);
     }
     return;
@@ -590,6 +595,7 @@ function scanOptions(parsed: ParsedScannerArguments, narrative: EffectiveNarrati
     ...(parsed.since ? { since: parsed.since } : {}),
     ...(parsed.until ? { until: parsed.until } : {}),
     utcOffsetMinutes: -new Date().getTimezoneOffset(),
+    includeGitAiAttribution: parsed.withGitAiAttribution,
     ...(cloudEvidence
       ? {
           narrative: { mode: "cloud" as const, model: null },
