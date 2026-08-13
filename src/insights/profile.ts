@@ -9,7 +9,28 @@ export const PROFILE_DIMENSIONS = [
 ] as const;
 
 export type ProfileDimension = typeof PROFILE_DIMENSIONS[number];
-export type Archetype = "Architect" | "Velocity Machine" | "Quality Guardian" | "Night Owl";
+export const ARCHETYPES = [
+  "Night Owl",
+  "Early Bird",
+  "Weekend Warrior",
+  "Marathon Coder",
+  "Architect",
+  "Quality Guardian",
+  "Shipping Machine",
+  "Explorer",
+] as const;
+export type ComputedArchetype = (typeof ARCHETYPES)[number];
+/** Legacy snapshots may still store Velocity Machine; new scans emit Shipping Machine. */
+export type Archetype = ComputedArchetype | "Velocity Machine";
+
+export function canonicalArchetypeName(name: string): ComputedArchetype | string {
+  if (name === "Velocity Machine") return "Shipping Machine";
+  return name;
+}
+
+export function archetypeFacetKey(name: string): string {
+  return canonicalArchetypeName(name).toLocaleLowerCase("en-US").replaceAll(" ", "-");
+}
 
 export type ProfileScore = {
   value: number;
@@ -31,6 +52,10 @@ export type BuilderProfile = {
     longestSessionMinutes: number;
     primaryModel: string | null;
     timezoneLabel: string;
+    nightShare: number;
+    morningShare: number;
+    weekendShare: number;
+    distinctToolCount: number;
   };
 };
 
@@ -42,12 +67,19 @@ export type ProfileInputs = {
 };
 
 const DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+const NIGHT_HOURS = new Set([22, 23, 0, 1, 2, 3, 4]);
+const MORNING_HOURS = new Set([5, 6, 7, 8, 9]);
+const WEEKEND_DAYS = new Set(["Saturday", "Sunday"]);
 const VERIFICATION_TOOLS = new Set(["Test", "Tests", "Run", "Shell", "Terminal", "Bash", "Check", "Lint", "Build", "Review"]);
 const EXPLORATORY_TOOLS = new Set(["Read", "Grep", "Glob", "Search", "Find", "List"]);
 const MUTATING_TOOLS = new Set(["Edit", "Write", "ApplyPatch", "Create", "Delete", "Move"]);
 
 function clampPercent(value: number): number {
   return Math.max(0, Math.min(100, Math.round(value)));
+}
+
+function sharePercent(count: number, total: number): number {
+  return total > 0 ? Math.round((count * 100) / total) : 0;
 }
 
 function safeRatio(numerator: number, denominator: number): number {
@@ -175,21 +207,69 @@ function scoreProfile(inputs: ProfileInputs): BuilderProfile["scores"] {
 }
 
 function archetypeFor(scores: BuilderProfile["scores"], workPatterns: BuilderProfile["workPatterns"]): BuilderProfile["archetype"] {
-  const rationale: string[] = [];
-  if (workPatterns.peakHours.some((hour) => hour >= 22 || hour < 5)) {
-    rationale.push(`Peak activity clusters around ${workPatterns.peakHours.slice(0, 3).map((hour) => `${String(hour).padStart(2, "0")}:00`).join(", ")} ${workPatterns.timezoneLabel}.`);
-    return { name: "Night Owl", rationale };
+  type Candidate = { name: ComputedArchetype; score: number; rationale: string };
+  const candidates: Candidate[] = [];
+  if (workPatterns.nightShare >= 20) {
+    candidates.push({
+      name: "Night Owl",
+      score: workPatterns.nightShare,
+      rationale: `${workPatterns.nightShare}% of sessions started between 10pm and 5am ${workPatterns.timezoneLabel}.`,
+    });
+  }
+  if (workPatterns.morningShare >= 20) {
+    candidates.push({
+      name: "Early Bird",
+      score: workPatterns.morningShare,
+      rationale: `${workPatterns.morningShare}% of sessions started between 5am and 10am ${workPatterns.timezoneLabel}.`,
+    });
+  }
+  if (workPatterns.weekendShare >= 30) {
+    candidates.push({
+      name: "Weekend Warrior",
+      score: workPatterns.weekendShare,
+      rationale: `${workPatterns.weekendShare}% of sessions landed on a weekend.`,
+    });
+  }
+  const median = workPatterns.medianSessionMinutes;
+  const longest = workPatterns.longestSessionMinutes;
+  if (median > 0 && longest >= 60 && longest >= median * 2) {
+    const ratio = Math.round((longest / median) * 10) / 10;
+    candidates.push({
+      name: "Marathon Coder",
+      score: Math.min(100, Math.round(ratio * 20)),
+      rationale: `Longest session ran ${longest} minutes — ${ratio}× the median.`,
+    });
   }
   if (scores.planning.value >= 70 && scores.engineering.value >= 60) {
-    rationale.push(`Planning scored ${scores.planning.value} and engineering scored ${scores.engineering.value}.`);
-    return { name: "Architect", rationale };
+    candidates.push({
+      name: "Architect",
+      score: Math.round((scores.planning.value + scores.engineering.value) / 2),
+      rationale: `Planning scored ${scores.planning.value} and engineering scored ${scores.engineering.value}.`,
+    });
   }
   if (scores.engineering.value >= 70 && scores.planning.value >= 55) {
-    rationale.push(`Engineering scored ${scores.engineering.value} with planning at ${scores.planning.value}.`);
-    return { name: "Quality Guardian", rationale };
+    candidates.push({
+      name: "Quality Guardian",
+      score: scores.engineering.value,
+      rationale: `Engineering scored ${scores.engineering.value} with planning at ${scores.planning.value}.`,
+    });
   }
-  rationale.push(`Execution scored ${scores.execution.value}; it was the clearest delivery signal in this window.`);
-  return { name: "Velocity Machine", rationale };
+  if (workPatterns.distinctToolCount >= 8) {
+    candidates.push({
+      name: "Explorer",
+      score: Math.min(100, workPatterns.distinctToolCount * 8),
+      rationale: `Reached for ${workPatterns.distinctToolCount} different tools in this window.`,
+    });
+  }
+  if (candidates.length === 0) {
+    return {
+      name: "Shipping Machine",
+      rationale: [`Execution scored ${scores.execution.value}; it was the clearest delivery signal in this window.`],
+    };
+  }
+  candidates.sort((left, right) => right.score - left.score || ARCHETYPES.indexOf(left.name) - ARCHETYPES.indexOf(right.name));
+  const winner = candidates[0]!;
+  return { name: winner.name, rationale: [winner.rationale] };
 }
 
 export function computeBuilderProfile(inputs: ProfileInputs): BuilderProfile {
@@ -197,11 +277,17 @@ export function computeBuilderProfile(inputs: ProfileInputs): BuilderProfile {
   const durations = inputs.sessions.map(durationMinutes);
   const hourCounts = new Map<number, number>();
   const dayCounts = new Map<string, number>();
+  let nightCount = 0;
+  let morningCount = 0;
+  let weekendCount = 0;
   for (const session of inputs.sessions) {
     const hour = localHour(session.startedAt, offset);
     hourCounts.set(hour, (hourCounts.get(hour) ?? 0) + 1);
     const day = localDay(session.startedAt, offset);
     dayCounts.set(day, (dayCounts.get(day) ?? 0) + 1);
+    if (NIGHT_HOURS.has(hour)) nightCount += 1;
+    if (MORNING_HOURS.has(hour)) morningCount += 1;
+    if (WEEKEND_DAYS.has(day)) weekendCount += 1;
   }
   const peakHours = [...hourCounts.entries()]
     .sort((left, right) => right[1] - left[1] || left[0] - right[0])
@@ -213,6 +299,7 @@ export function computeBuilderProfile(inputs: ProfileInputs): BuilderProfile {
     .map(([day]) => day);
   const primaryModel = [...inputs.usage.models]
     .sort((left, right) => right.turnCount - left.turnCount || `${left.provider}:${left.name}`.localeCompare(`${right.provider}:${right.name}`))[0];
+  const sessionCount = inputs.sessions.length;
   const workPatterns: BuilderProfile["workPatterns"] = {
     peakHours,
     preferredDays,
@@ -220,6 +307,10 @@ export function computeBuilderProfile(inputs: ProfileInputs): BuilderProfile {
     longestSessionMinutes: durations.length ? Math.max(...durations) : 0,
     primaryModel: primaryModel ? `${primaryModel.provider}:${primaryModel.name}` : null,
     timezoneLabel: timezoneLabel(inputs.timeWindow?.utcOffsetMinutes),
+    nightShare: sharePercent(nightCount, sessionCount),
+    morningShare: sharePercent(morningCount, sessionCount),
+    weekendShare: sharePercent(weekendCount, sessionCount),
+    distinctToolCount: inputs.usage.tools.length,
   };
   const scores = scoreProfile(inputs);
   return { scores, archetype: archetypeFor(scores, workPatterns), workPatterns };

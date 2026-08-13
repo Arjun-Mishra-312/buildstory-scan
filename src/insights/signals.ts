@@ -132,6 +132,28 @@ function rhythmSignals(inputs: SignalInputs): Signal[] {
   }
 
   if (sessions.length >= 4) {
+    const weekdayCounts = [0, 0, 0, 0, 0, 0, 0];
+    for (const session of sessions) {
+      weekdayCounts[localWeekday(session.startedAt, offset)] += 1;
+    }
+    const busiestWeekday = weekdayCounts
+      .map((count, day) => ({ day, count }))
+      .sort((left, right) => right.count - left.count || left.day - right.day)[0];
+    if (busiestWeekday && busiestWeekday.count >= 3 && busiestWeekday.count >= sessions.length * 0.28) {
+      const share = pct(busiestWeekday.count, sessions.length);
+      const name = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][busiestWeekday.day] ?? "Friday";
+      signals.push({
+        id: "busiest-weekday", family: "rhythm",
+        headline: `${share}% of your sessions landed on ${name}s`,
+        detail: `${busiestWeekday.count} of ${sessions.length} sessions.`,
+        value: share, unit: "%", notability: Math.min(100, Math.round(share * 1.4)),
+        formula: "round(100 * max(sessionsByWeekday) / sessions)",
+        sourceRefs: [],
+      });
+    }
+  }
+
+  if (sessions.length >= 4) {
     const sortedStarts = sessions.map((session) => Date.parse(session.startedAt)).sort((left, right) => left - right);
     let maxGapMs = 0;
     for (let index = 1; index < sortedStarts.length; index += 1) {
