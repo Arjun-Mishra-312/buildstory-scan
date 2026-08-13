@@ -1,4 +1,5 @@
 import type { AnalysisTier, GeneratedNarrativeSections, NarrativeProvider, ProjectSnapshot, ReportStoryPack } from "../contract.js";
+import { NARRATIVE_SYSTEM_PROMPT } from "../engine/prompt.js";
 import { defaultProfileNarrative, type BuilderProfile } from "../insights/profile.js";
 import type { Redactor } from "../redaction.js";
 import type { ScanProgressReporter } from "../progress.js";
@@ -186,10 +187,8 @@ function facts(input: LocalNarrativeInput, includeExcerpts = true): string {
   ].join("\n");
 }
 
-// Mirrors the cloud pipeline's system prompt (lib/narrative/prompt.ts) - not
-// a project summary, not a performance review, and never advice. See the
-// report-redesign sprint.
-const SYSTEM_PROMPT = `You write a short, honest build story from deterministic facts and optional redacted conversation excerpts - not a project summary, not a performance review, but a surprising, true, specific detail about how this particular build went. Treat every score, count, timestamp-derived pattern, and archetype as a fact; never invent a feature, name, motivation, technology, or number that wasn't given to you verbatim. Never give advice, a recommendation, a next step, or a "you should" - report what happened and what is true about it, not what to do next. Do not reconstruct bracketed redactions. The product-instinct score is explicitly a weak proxy; describe it cautiously. Return JSON only.`;
+// Canonical prompt lives in engine/prompt.ts so Cloud and local generation stay aligned.
+const SYSTEM_PROMPT = NARRATIVE_SYSTEM_PROMPT;
 
 function boundedEnvironmentInteger(name: string, fallback: number, minimum: number, maximum: number): number {
   const parsed = Number(process.env[name]);

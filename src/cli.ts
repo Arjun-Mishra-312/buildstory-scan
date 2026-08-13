@@ -16,7 +16,10 @@ import { localCapabilityProfile } from "./narrative/local-capability.js";
 import { writeSnapshotFile } from "./output.js";
 import { Redactor } from "./redaction.js";
 import { inspectRepository } from "./repository.js";
+import { defaultGenerateOutputDirectory, generateLocalReport, resolveGenerateMode, type GenerateNarrativeMode } from "./run-generate.js";
 import { buildProjectSnapshot, inspectSelectedRepository, providerLabel } from "./scanner.js";
+import { launchGenerateTui, shouldUseGenerateTui } from "./tui/launch.js";
+import { renderCompactReceipt } from "./tui/receipt.js";
 import { isRegisteredProvider, REGISTERED_PROVIDER_IDS } from "./sources/registry.js";
 import type { ScanProgressEvent, ScanProgressReporter } from "./progress.js";
 import {
@@ -69,18 +72,35 @@ const CLI_COMMAND = "buildstory-scan";
 
 const HELP = `BuildStory CLI ${SCANNER_VERSION}
 
-Read-only local scanner. ProjectSnapshot transport is loopback by default, or
-a single explicitly pinned HTTPS remote host per connection.
+Turn AI-assisted Git work into the story of how it was built — on your machine.
 
 Usage:
-  ${CLI_COMMAND} connect <upload-session-id> --code <device-code> --api-base-url <loopback-url>
+  ${CLI_COMMAND} generate [--repo <directory>] --consent local-scan
   ${CLI_COMMAND} connect <upload-session-id> --code <device-code> --remote
-  ${CLI_COMMAND} connect <upload-session-id> --code <device-code> --api-base-url <https-url> --allow-host <hostname>
+  ${CLI_COMMAND} connect <upload-session-id> --code <device-code> --api-base-url <loopback-url>
   ${CLI_COMMAND} status [--timeout-ms <number>]
   ${CLI_COMMAND} inspect --repo <directory>
   ${CLI_COMMAND} scan --repo <directory> --consent local-scan --dry-run
   ${CLI_COMMAND} scan --repo <directory> --consent local-scan --output <file> [--overwrite]
   ${CLI_COMMAND} scan-upload --repo <directory> --consent local-scan --upload-consent local-dashboard
+
+With no command, a TTY inside a Git worktree starts generate.
+
+Generate:
+  --repo <directory>         Git worktree (default: current directory).
+  --consent local-scan       Allow local repository/session metadata reads.
+  --output-dir <directory>   Write report.json, report.md, and report.html here
+                             (default: ./buildstory).
+  --off                      Metrics-only; do not call a model.
+  --local                    Force loopback Ollama even if a BYOK key is set.
+  --json                     Print the snapshot JSON; skip the TUI.
+  --no-tui                   Print a compact receipt; skip the TUI.
+  --quiet                    Suppress progress and non-error success output.
+
+generate never contacts Buildstory. Default model path is local Ollama, or
+your OpenRouter/OpenAI key when BUILDSTORY_OPENROUTER_API_KEY or
+BUILDSTORY_OPENAI_API_KEY is set. Open in BuildStory only if you later run
+connect / scan-upload.
 
 Connection options:
   --code <device-code>       One-time code copied from the dashboard.
@@ -139,26 +159,28 @@ Scanner options:
   --help                     Show this help.
   --version                  Show the scanner version.
 
-connect never scans or uploads. scan never uses the network. scan-upload is the
-only snapshot network path, and only ever talks to the single endpoint pinned
-during the preceding connect (loopback, or the one --allow-host/--remote host).
-It sends exactly one canonical, schema-validated ProjectSnapshot ${PROJECT_SNAPSHOT_SCHEMA_VERSION}
-using a short-lived, one-use grant. Browser cookies, redirects, unpinned hosts,
-source/file bodies, diffs, transcript bodies, tool arguments/results, file
-paths, and secret text are not sent.
-
-Local mode is the default for new connections and calls Ollama on loopback;
-generatedNarrative is uploaded but narrativeEvidence is never uploaded.
-Bring-your-own-key mode calls OpenRouter or OpenAI with a key you configure in
-the scanner environment. It requires --review and typed confirmation before
-the displayed deterministic facts and exact redacted excerpts are sent. They
-go only to that provider, never to Buildstory; only the resulting standard-
-depth generatedNarrative is uploaded, exactly like local mode.
-Buildstory Cloud mode is explicit and, with --review confirmation, includes
-a bounded set of redacted excerpts sent through Buildstory to Buildstory's
-own narrative provider - there is no model choice on this path. Off mode
-uploads deterministic metrics/profile facts only.
+The report-generation engine is open source:
+https://github.com/Arjun-Mishra-312/buildstory-scan
 `;
+
+interface ParsedGenerateArguments {
+  command: "generate";
+  repo: string;
+  projectName?: string;
+  source: ProviderId[];
+  codexHome?: string;
+  claudeCodeHome?: string;
+  cursorHome?: string;
+  antigravityHome?: string;
+  since?: string;
+  until?: string;
+  consent?: string;
+  outputDirectory: string;
+  json: boolean;
+  noTui: boolean;
+  quiet: boolean;
+  mode: "auto" | GenerateNarrativeMode;
+}
 
 interface ParsedScannerArguments {
   command: "inspect" | "scan" | "scan-upload";
@@ -197,7 +219,7 @@ interface ParsedStatusArguments {
   timeoutMilliseconds?: number;
 }
 
-type ParsedArguments = ParsedScannerArguments | ParsedConnectArguments | ParsedStatusArguments;
+type ParsedArguments = ParsedScannerArguments | ParsedConnectArguments | ParsedStatusArguments | ParsedGenerateArguments;
 
 const SCANNER_VALUE_OPTIONS = new Set([
   "--repo",
@@ -327,26 +349,7 @@ function parseScannerArguments(
 
   const repo = values.get("--repo");
   if (!repo) throw new ScannerError("REPOSITORY_REQUIRED", "--repo is required; use --repo . for the current repository.", 2);
-  const rawSource = values.get("--source");
-  const source =
-    !rawSource || rawSource.trim() === "all"
-      ? [...REGISTERED_PROVIDER_IDS]
-      : rawSource.split(",").map((value) => value.trim()).filter((value) => value.length > 0);
-  if (source.length === 0) {
-    throw new ScannerError("UNSUPPORTED_PROVIDER", "--source must name at least one provider, or \"all\".", 2);
-  }
-  if (new Set(source).size !== source.length) {
-    throw new ScannerError("DUPLICATE_OPTION", "--source lists the same provider more than once.", 2);
-  }
-  for (const provider of source) {
-    if (!isRegisteredProvider(provider)) {
-      throw new ScannerError(
-        "UNSUPPORTED_PROVIDER",
-        `--source does not support "${provider}"; use ${REGISTERED_PROVIDER_IDS.join(", ")}, "all", or a comma-separated list.`,
-        2,
-      );
-    }
-  }
+  const source = parseSourceList(values.get("--source"));
 
   const common = {
     command,
@@ -385,16 +388,113 @@ function parseScannerArguments(
   };
 }
 
-function parseArguments(argv: string[]): ParsedArguments | "help" | "version" {
-  if (argv.length === 0 || argv.includes("--help") || argv[0] === "help") return "help";
+function parseSourceList(rawSource: string | undefined): ProviderId[] {
+  const source =
+    !rawSource || rawSource.trim() === "all"
+      ? [...REGISTERED_PROVIDER_IDS]
+      : rawSource.split(",").map((value) => value.trim()).filter((value) => value.length > 0);
+  if (source.length === 0) {
+    throw new ScannerError("UNSUPPORTED_PROVIDER", "--source must name at least one provider, or \"all\".", 2);
+  }
+  if (new Set(source).size !== source.length) {
+    throw new ScannerError("DUPLICATE_OPTION", "--source lists the same provider more than once.", 2);
+  }
+  for (const provider of source) {
+    if (!isRegisteredProvider(provider)) {
+      throw new ScannerError(
+        "UNSUPPORTED_PROVIDER",
+        `--source does not support "${provider}"; use ${REGISTERED_PROVIDER_IDS.join(", ")}, "all", or a comma-separated list.`,
+        2,
+      );
+    }
+  }
+  return source as ProviderId[];
+}
+
+const GENERATE_VALUE_OPTIONS = new Set([
+  "--repo",
+  "--project-name",
+  "--source",
+  "--codex-home",
+  "--claude-code-home",
+  "--cursor-home",
+  "--antigravity-home",
+  "--since",
+  "--until",
+  "--consent",
+  "--output-dir",
+]);
+const GENERATE_BOOLEAN_OPTIONS = new Set(["--off", "--local", "--json", "--no-tui", "--quiet"]);
+
+function parseGenerateArguments(argv: string[]): ParsedGenerateArguments {
+  const values = new Map<string, string>();
+  const flags = new Set<string>();
+  for (let index = 1; index < argv.length; index += 1) {
+    const argument = argv[index];
+    if (!argument) continue;
+    if (GENERATE_BOOLEAN_OPTIONS.has(argument)) {
+      if (flags.has(argument)) throw new ScannerError("DUPLICATE_OPTION", `${argument} may be supplied only once.`, 2);
+      flags.add(argument);
+      continue;
+    }
+    if (!GENERATE_VALUE_OPTIONS.has(argument)) {
+      throw new ScannerError("UNKNOWN_OPTION", "An unknown generate option was supplied.", 2);
+    }
+    if (values.has(argument)) {
+      throw new ScannerError("DUPLICATE_OPTION", `${argument} may be supplied only once.`, 2);
+    }
+    const value = argv[index + 1];
+    if (!value || value.startsWith("--")) {
+      throw new ScannerError("MISSING_OPTION_VALUE", `${argument} requires a value.`, 2);
+    }
+    values.set(argument, value);
+    index += 1;
+  }
+  if (flags.has("--off") && flags.has("--local")) {
+    throw new ScannerError("GENERATE_MODE_CONFLICT", "--off and --local cannot be combined.", 2);
+  }
+  const mode: ParsedGenerateArguments["mode"] = flags.has("--off") ? "off" : flags.has("--local") ? "local" : "auto";
+  const source = parseSourceList(values.get("--source"));
+  const consent = values.get("--consent");
+  const projectName = values.get("--project-name");
+  const codexHome = values.get("--codex-home");
+  const claudeCodeHome = values.get("--claude-code-home");
+  const cursorHome = values.get("--cursor-home");
+  const antigravityHome = values.get("--antigravity-home");
+  const since = values.get("--since");
+  const until = values.get("--until");
+  return {
+    command: "generate",
+    repo: values.get("--repo") ?? ".",
+    source,
+    outputDirectory: values.get("--output-dir") ?? defaultGenerateOutputDirectory(),
+    json: flags.has("--json"),
+    noTui: flags.has("--no-tui"),
+    quiet: flags.has("--quiet"),
+    mode,
+    ...(consent ? { consent } : {}),
+    ...(projectName ? { projectName } : {}),
+    ...(codexHome ? { codexHome } : {}),
+    ...(claudeCodeHome ? { claudeCodeHome } : {}),
+    ...(cursorHome ? { cursorHome } : {}),
+    ...(antigravityHome ? { antigravityHome } : {}),
+    ...(since ? { since } : {}),
+    ...(until ? { until } : {}),
+  };
+}
+
+function parseArguments(argv: string[]): ParsedArguments | "help" | "version" | "default-generate" {
+  if (argv.includes("--help") || argv[0] === "help") return "help";
   if (argv.includes("--version") || argv[0] === "version") return "version";
+  if (argv.length === 0) return "default-generate";
   const command = argv[0];
+  if (command === "generate") return parseGenerateArguments(argv);
   if (command === "connect") return parseConnectArguments(argv);
   if (command === "status") return parseStatusArguments(argv);
   if (command === "inspect" || command === "scan" || command === "scan-upload") {
     return parseScannerArguments(argv, command);
   }
-  throw new ScannerError("INVALID_COMMAND", "Expected connect, status, inspect, scan, or scan-upload.", 2);
+  throw new ScannerError("INVALID_COMMAND", "Expected generate, connect, status, inspect, scan, or scan-upload.", 2);
 }
 
 function validateScannerArguments(args: ParsedScannerArguments): void {
@@ -739,6 +839,56 @@ function printLocalNarrativeForReview(snapshot: ReviewableSnapshot, mode: "local
   if (narrative.fallbacksUsed.length) process.stdout.write(`Deterministic fallbacks used: ${narrative.fallbacksUsed.join(", ")}.\n\n`);
 }
 
+async function cwdIsGitWorktree(): Promise<boolean> {
+  try {
+    await inspectRepository(process.cwd(), new Redactor());
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function executeGenerate(parsed: ParsedGenerateArguments, requireConsent: boolean): Promise<number> {
+  if (!requireConsent && parsed.consent !== "local-scan") {
+    throw new ScannerError("CONSENT_REQUIRED", "generate requires --consent local-scan before any AI session source is read.", 2);
+  }
+  const mode = resolveGenerateMode(parsed.mode);
+  const request = {
+    repositoryPath: parsed.repo,
+    outputDirectory: parsed.outputDirectory,
+    consent: "local-scan" as const,
+    mode,
+    ...(parsed.projectName ? { projectName: parsed.projectName } : {}),
+    providers: parsed.source,
+    ...(parsed.codexHome ? { codexHome: parsed.codexHome } : {}),
+    ...(parsed.claudeCodeHome ? { claudeCodeHome: parsed.claudeCodeHome } : {}),
+    ...(parsed.cursorHome ? { cursorHome: parsed.cursorHome } : {}),
+    ...(parsed.antigravityHome ? { antigravityHome: parsed.antigravityHome } : {}),
+    ...(parsed.since ? { since: parsed.since } : {}),
+    ...(parsed.until ? { until: parsed.until } : {}),
+  };
+  if (shouldUseGenerateTui({ json: parsed.json, noTui: parsed.noTui, quiet: parsed.quiet })) {
+    return launchGenerateTui({ request, requireConsent: requireConsent || parsed.consent !== "local-scan" });
+  }
+  if (requireConsent && parsed.consent !== "local-scan") {
+    throw new ScannerError("CONSENT_REQUIRED", "generate requires --consent local-scan before any AI session source is read.", 2);
+  }
+  const progress = createProgressReporter(parsed.quiet || parsed.json);
+  try {
+    const generated = await generateLocalReport({ ...request, onProgress: progress.reporter });
+    progress.stop();
+    if (parsed.json) {
+      process.stdout.write(canonicalJson(generated.snapshot));
+      return 0;
+    }
+    if (!parsed.quiet) process.stdout.write(renderCompactReceipt(generated.snapshot, generated.files, generated.mode));
+    return 0;
+  } catch (error) {
+    progress.stop();
+    throw error;
+  }
+}
+
 export function isPromptCancellation(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   const code = "code" in error && typeof error.code === "string" ? error.code : "";
@@ -777,6 +927,16 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
   if (parsed === "version") {
     process.stdout.write(`${SCANNER_VERSION}\n`);
     return 0;
+  }
+  if (parsed === "default-generate") {
+    if (process.stdout.isTTY && await cwdIsGitWorktree()) {
+      return executeGenerate(parseGenerateArguments(["generate"]), true);
+    }
+    process.stdout.write(HELP);
+    return 0;
+  }
+  if (parsed.command === "generate") {
+    return executeGenerate(parsed, !parsed.consent);
   }
   if (parsed.command === "connect") {
     const receipt = await connectBuildStory({

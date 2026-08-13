@@ -1,16 +1,15 @@
 {
   "name": "buildstory-scan",
-  "version": "1.1.2",
-  "description": "BuildStory read-only local scanner for privacy-preserving AI-assisted project snapshots.",
+  "version": "1.2.0",
+  "description": "Open-source BuildStory engine: turn local Git and AI-coding-session history into an inspectable build report.",
   "keywords": ["buildstory", "cli", "privacy", "ai-assisted-development", "read-only", "codex", "claude-code", "cursor", "antigravity"],
   "homepage": "https://buildstory.dev",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Arjun-Mishra-312/buildStory.git",
-    "directory": "packages/buildstory-scanner"
+    "url": "git+https://github.com/Arjun-Mishra-312/buildstory-scan.git"
   },
   "bugs": {
-    "url": "https://github.com/Arjun-Mishra-312/buildStory/issues"
+    "url": "https://github.com/Arjun-Mishra-312/buildstory-scan/issues"
   },
   "type": "module",
   "bin": {
@@ -20,6 +19,10 @@
     ".": {
       "types": "./dist/src/index.d.ts",
       "import": "./dist/src/index.js"
+    },
+    "./engine": {
+      "types": "./dist/src/engine/index.d.ts",
+      "import": "./dist/src/engine/index.js"
     },
     "./schema": "./schema/project-snapshot.schema.json"
   },
@@ -39,6 +42,7 @@
     "buildstory": "node dist/src/cli.js",
     "scan": "node dist/src/cli.js",
     "reconcile": "node scripts/reconcile-snapshot.mjs",
+    "prepare": "npm run build",
     "prepack": "npm run build"
   },
   "engines": {
@@ -46,10 +50,13 @@
   },
   "dependencies": {
     "ajv": "^8.17.1",
-    "ajv-formats": "^3.0.1"
+    "ajv-formats": "^3.0.1",
+    "ink": "^6.2.3",
+    "react": "^19.2.8"
   },
   "devDependencies": {
     "@types/node": "^22.15.3",
+    "@types/react": "^19.2.14",
     "typescript": "^5.8.3"
   },
   "license": "MIT"

@@ -14,4 +14,6 @@ export { computeBuilderProfile, defaultProfileNarrative, PROFILE_DIMENSIONS } fr
 export { buildEventSpine } from "./insights/event-spine.js";
 export { createByokNarrativeGenerator, createOllamaNarrativeGenerator, LocalNarrativeGenerationError } from "./narrative/local.js";
 export { buildStoryPackSources, createDefaultStoryPack, sanitizeStoryPack, sectionsFromStoryPack } from "./narrative/story-pack.js";
+export { generateLocalReport, resolveGenerateMode } from "./run-generate.js";
+export { renderHtmlReport, renderMarkdownReport } from "./exporters/report.js";
 export type { BuilderProfile, ProfileNarrativeSections } from "./insights/profile.js";
