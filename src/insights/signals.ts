@@ -134,7 +134,8 @@ function rhythmSignals(inputs: SignalInputs): Signal[] {
   if (sessions.length >= 4) {
     const weekdayCounts = [0, 0, 0, 0, 0, 0, 0];
     for (const session of sessions) {
-      weekdayCounts[localWeekday(session.startedAt, offset)] += 1;
+      const weekday = localWeekday(session.startedAt, offset);
+      weekdayCounts[weekday] = (weekdayCounts[weekday] ?? 0) + 1;
     }
     const busiestWeekday = weekdayCounts
       .map((count, day) => ({ day, count }))
