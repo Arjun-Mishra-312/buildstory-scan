@@ -26,7 +26,7 @@ export const CLOUD_STANDARD_MAX_EXCERPTS_PER_SESSION = 8;
 export const CLOUD_STANDARD_MAX_ASSISTANT_DECISIONS_PER_SESSION = 4;
 // Deep uses the larger context as bounded capacity, while the CLI dynamically
 // lowers the byte allowance to keep the complete upload below its grant.
-export const DEEP_MAX_EXCERPTS = 240;
+export const DEEP_MAX_EXCERPTS = 400;
 export const DEEP_MAX_CHARS_PER_EXCERPT = 1_500;
 export const DEEP_MAX_TOTAL_EXCERPT_BYTES = 700 * 1024;
 export const DEEP_MAX_EXCERPTS_PER_SESSION = 12;

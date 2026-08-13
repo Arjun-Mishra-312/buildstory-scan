@@ -499,7 +499,7 @@ export function sanitizeStoryPack(
       chapterChanges: findings("deepAnalysis.chapterChanges", deep.chapterChanges, 5),
       coverage: {
         sessionsSeen: boundedCount(coverageValue.sessionsSeen, 100_000),
-        excerptsUsed: boundedCount(coverageValue.excerptsUsed, 240),
+        excerptsUsed: boundedCount(coverageValue.excerptsUsed, 400),
         evidenceBytes: boundedCount(coverageValue.evidenceBytes, 700 * 1024),
         windowStart: iso(coverageValue.windowStart),
         windowEnd: iso(coverageValue.windowEnd),

@@ -757,7 +757,7 @@
         },
         "excerpts": {
           "type": "array",
-          "maxItems": 240,
+          "maxItems": 400,
           "items": { "$ref": "#/$defs/narrativeExcerpt" }
         },
         "discarded": {

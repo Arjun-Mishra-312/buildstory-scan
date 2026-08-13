@@ -200,7 +200,7 @@ test("deep narrative selector quotas remain internal and the emitted evidence po
       since: "2026-08-04T00:00:00Z",
       until: "2026-08-05T00:00:00Z",
       narrativeEvidence: {
-        maxExcerpts: 240,
+        maxExcerpts: 400,
         maxCharsPerExcerpt: 1_500,
         maxTotalChars: 700 * 1024,
         maxTotalBytes: 700 * 1024,

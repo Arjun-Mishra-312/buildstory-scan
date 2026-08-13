@@ -91,7 +91,7 @@ const DEEP_REPORT_SCHEMA = {
   required: [...STORY_PACK_STORY_SCHEMA.required, "decisions", "learnings", "growthEdge"],
   properties: { ...STORY_PACK_STORY_SCHEMA.properties, ...STORY_PACK_INSIGHTS_SCHEMA.properties, deepAnalysis: DEEP_ANALYSIS_SCHEMA },
 } as const;
-type ByokComponent = StoryPackComponent | "deep" | "deep-report";
+type NarrativeComponent = StoryPackComponent | "deep" | "deep-report";
 
 function localBaseUrl(raw = process.env.BUILDSTORY_OLLAMA_BASE_URL?.trim() || DEFAULT_OLLAMA_URL): URL {
   let url: URL;
@@ -208,6 +208,20 @@ function componentFallbackReason(error: unknown): string {
   return "was invalid";
 }
 
+function schemaForComponent(component: NarrativeComponent) {
+  if (component === "story") return STORY_PACK_STORY_SCHEMA;
+  if (component === "insights") return STORY_PACK_INSIGHTS_SCHEMA;
+  if (component === "deep") return DEEP_ANALYSIS_SCHEMA;
+  return DEEP_REPORT_SCHEMA;
+}
+
+function schemaNameForComponent(component: NarrativeComponent): string {
+  if (component === "story") return "buildstory_story";
+  if (component === "insights") return "buildstory_insights";
+  if (component === "deep") return "buildstory_deep_analysis";
+  return "buildstory_deep_report";
+}
+
 async function callOllama(
   url: URL,
   model: string,
@@ -276,7 +290,7 @@ async function callByok(
   model: string,
   prompt: string,
   timeoutMs: number,
-  component: ByokComponent,
+  component: NarrativeComponent,
   provider: "openrouter" | "openai",
   analysisTier: AnalysisTier,
 ): Promise<unknown> {
@@ -286,9 +300,9 @@ async function callByok(
     let response: Response;
     try {
       const schema = {
-        name: component === "story" ? "buildstory_story" : component === "insights" ? "buildstory_insights" : component === "deep" ? "buildstory_deep_analysis" : "buildstory_deep_report",
+        name: schemaNameForComponent(component),
         strict: true,
-        schema: component === "story" ? STORY_PACK_STORY_SCHEMA : component === "insights" ? STORY_PACK_INSIGHTS_SCHEMA : component === "deep" ? DEEP_ANALYSIS_SCHEMA : DEEP_REPORT_SCHEMA,
+        schema: schemaForComponent(component),
       };
       response = await fetch(`${baseUrl}/${provider === "openai" ? "responses" : "chat/completions"}`, {
         method: "POST",
@@ -423,26 +437,86 @@ function matchesRequiredShape(value: unknown, schema: { required: readonly strin
   });
 }
 
-async function callByokDeepWithRepair(baseUrl: string, apiKey: string, model: string, prompt: string, timeoutMs: number, allowedRefs: Set<string>, provider: "openrouter" | "openai", component: "deep" | "deep-report" = "deep"): Promise<unknown> {
+function deepComponentValid(value: unknown, component: "deep" | "deep-report", allowedRefs: Set<string>): boolean {
+  const objectValue = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+  // Deep-report runs the real field-level validator (title lengths,
+  // sourceRefs provenance, cardinality) against its story and insights
+  // portions. The pass-1 analysis map is composed locally, so pass 2
+  // does not need to return a second copy of deepAnalysis or standoutTraits.
+  if (component === "deep") return matchesRequiredShape(value, DEEP_ANALYSIS_SCHEMA);
+  return objectValue !== null
+    && validateStoryPackComponent(objectValue, "story", allowedRefs).ok
+    && validateStoryPackComponent(objectValue, "insights", allowedRefs, { allowMissingStandoutTraits: true }).ok;
+}
+
+async function repairDeepComponent(
+  prompt: string,
+  allowedRefs: Set<string>,
+  component: "deep" | "deep-report",
+  callOnce: (currentPrompt: string) => Promise<unknown>,
+  failureLabel: string,
+): Promise<unknown> {
   let currentPrompt = prompt;
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    const value = await callByok(baseUrl, apiKey, model, currentPrompt, timeoutMs, component, provider, "deep");
+    const value = await callOnce(currentPrompt);
     const invalid = unknownSourceRefs(value, allowedRefs);
-    const objectValue = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
-    // Deep-report runs the real field-level validator (title lengths,
-    // sourceRefs provenance, cardinality) against its story and insights
-    // portions. The pass-1 analysis map is composed server-side, so pass 2
-    // does not need to return a second copy of deepAnalysis or standoutTraits.
-    const shapeOk = component === "deep"
-      ? matchesRequiredShape(value, DEEP_ANALYSIS_SCHEMA)
-      : objectValue !== null
-        && validateStoryPackComponent(objectValue, "story", allowedRefs).ok
-        && validateStoryPackComponent(objectValue, "insights", allowedRefs, { allowMissingStandoutTraits: true }).ok;
-    if (!invalid.length && shapeOk) return value;
-    if (attempt === 1) throw new LocalNarrativeGenerationError("local_provider_invalid_response", "The configured provider returned invalid deep analysis after repair.");
+    if (!invalid.length && deepComponentValid(value, component, allowedRefs)) return value;
+    if (attempt === 1) throw new LocalNarrativeGenerationError("local_provider_invalid_response", `${failureLabel} after repair.`);
     currentPrompt = `${prompt}\nValidation feedback: use only these source references: ${[...allowedRefs].join(", ")}. Return one JSON object and no prose.`;
   }
-  throw new LocalNarrativeGenerationError("local_provider_invalid_response", "The configured provider returned invalid deep analysis after repair.");
+  throw new LocalNarrativeGenerationError("local_provider_invalid_response", `${failureLabel} after repair.`);
+}
+
+async function callByokDeepWithRepair(baseUrl: string, apiKey: string, model: string, prompt: string, timeoutMs: number, allowedRefs: Set<string>, provider: "openrouter" | "openai", component: "deep" | "deep-report" = "deep"): Promise<unknown> {
+  return repairDeepComponent(
+    prompt,
+    allowedRefs,
+    component,
+    (currentPrompt) => callByok(baseUrl, apiKey, model, currentPrompt, timeoutMs, component, provider, "deep"),
+    "The configured provider returned invalid deep analysis",
+  );
+}
+
+async function runDeepNarrativeGeneration(
+  input: LocalNarrativeInput,
+  provider: string,
+  model: string,
+  callDeepWithRepair: (prompt: string, allowedRefs: Set<string>, component: "deep" | "deep-report") => Promise<unknown>,
+): Promise<{ provider: string; model: string; sections: GeneratedNarrativeSections; storyPack?: ReportStoryPack; fallbacksUsed: string[] }> {
+  const defaultPack = createDefaultStoryPack(input.snapshot as ProjectSnapshot, input.profile, input.excerpts);
+  const allowedRefs = new Set(defaultPack.sources.map((source) => source.ref));
+  // Every number in this list was computed in code, never by the model
+  // (see insights/signals.ts) - byTheNumbers below may only frame one of
+  // these by its exact id, never invent a statistic of its own.
+  const signalsText = defaultPack.signals.length
+    ? `\n\nCOMPUTED SIGNALS:\n${defaultPack.signals.map((signal) => `- ${signal.id}: ${signal.headline} (${signal.detail})`).join("\n")}`
+    : "\n\nCOMPUTED SIGNALS:\nNone computed for this build window.";
+  const analysisPrompt = `${facts(input)}${signalsText}\n\nProduce the private analysis map with openingLine (the one-line hook), signatureMoves (this builder's distinctive patterns, grounded in the facts above), byTheNumbers (frame the most notable COMPUTED SIGNALS into shareable findings - every entry's signalId must be copied exactly from the list above), whereItGotHard (friction and recovery, as narrative, not an audit finding), and chapterChanges. Each list answers a different question; do not restate the same event across signatureMoves, whereItGotHard, and byTheNumbers. Never give advice, a recommendation, or a next step. Every claim must cite only: ${[...allowedRefs].join(", ")}. Leave lists empty when evidence is insufficient.`;
+  input.onProgress?.({ stage: "generating-story", state: "start", model, message: "Generating private deep analysis (1/2)." });
+  const analysis = await callDeepWithRepair(analysisPrompt, allowedRefs, "deep");
+  input.onProgress?.({ stage: "generating-story", state: "complete", model, message: "Private deep analysis generated (1/2)." });
+  const synthesisPrompt = `${facts(input, false)}\n\nSOURCE REFS: ${[...allowedRefs].join(", ")}\n\nPRIVATE ANALYSIS MAP:\n${JSON.stringify(analysis)}\n\nCreate one layered StoryPackV3 JSON object. Do not restate signatureMoves as standoutTraits; do not restate whereItGotHard as moments - choose delivery or discovery moments instead. Do not reuse openingLine.title in hero.headline, and make turningPoint a distinct inflection from whereItGotHard. Do not output standoutTraits or deepAnalysis; Buildstory will derive or attach those from the validated analysis map. Use 6-12 moments only when supported. Do not invent claims or source references.`;
+  input.onProgress?.({ stage: "generating-insights", state: "start", model, message: "Synthesizing deep report (2/2)." });
+  const synthesized = await callDeepWithRepair(synthesisPrompt, allowedRefs, "deep-report");
+  input.onProgress?.({ stage: "generating-insights", state: "complete", model, message: "Deep report synthesized (2/2)." });
+  const candidate = synthesized && typeof synthesized === "object" && !Array.isArray(synthesized) ? synthesized as Record<string, unknown> : {};
+  const withCoverage = {
+    ...candidate,
+    version: "3.0.0",
+    analysisTier: "deep",
+    deepAnalysis: {
+      ...(analysis && typeof analysis === "object" && !Array.isArray(analysis) ? analysis as Record<string, unknown> : {}),
+      coverage: {
+        sessionsSeen: input.snapshot.sessions.length,
+        excerptsUsed: input.excerpts.length,
+        evidenceBytes: Buffer.byteLength(input.excerpts.map((excerpt) => excerpt.text).join(""), "utf8"),
+        windowStart: input.snapshot.timeWindow.start,
+        windowEnd: input.snapshot.timeWindow.end,
+      },
+    },
+  };
+  const normalized = sanitizeStoryPack(withCoverage, defaultPack, input.redactor);
+  return { provider, model, storyPack: normalized.storyPack, sections: sectionsFromStoryPack(normalized.storyPack), fallbacksUsed: normalized.fallbacksUsed };
 }
 
 async function resolveOllamaModel(url: URL, requestedModel: string | null | undefined, timeoutMs: number): Promise<string> {
@@ -624,36 +698,8 @@ export function createByokNarrativeGenerator(requestedModel?: string | null, pro
     })();
     input.onProgress?.({ stage: "resolving-model", state: "complete", model, message: `Using configured model ${model} via ${hostForProgressOnly}.` });
     if (analysisTier === "deep") {
-      const defaultPack = createDefaultStoryPack(input.snapshot as ProjectSnapshot, input.profile, input.excerpts);
-      const allowedRefs = new Set(defaultPack.sources.map((source) => source.ref));
-      // Every number in this list was computed in code, never by the model
-      // (see insights/signals.ts) - byTheNumbers below may only frame one of
-      // these by its exact id, never invent a statistic of its own.
-      const signalsText = defaultPack.signals.length
-        ? `\n\nCOMPUTED SIGNALS:\n${defaultPack.signals.map((signal) => `- ${signal.id}: ${signal.headline} (${signal.detail})`).join("\n")}`
-        : "\n\nCOMPUTED SIGNALS:\nNone computed for this build window.";
-      const analysisPrompt = `${facts(input)}${signalsText}\n\nProduce the private analysis map with openingLine (the one-line hook), signatureMoves (this builder's distinctive patterns, grounded in the facts above), byTheNumbers (frame the most notable COMPUTED SIGNALS into shareable findings - every entry's signalId must be copied exactly from the list above), whereItGotHard (friction and recovery, as narrative, not an audit finding), and chapterChanges. Each list answers a different question; do not restate the same event across signatureMoves, whereItGotHard, and byTheNumbers. Never give advice, a recommendation, or a next step. Every claim must cite only: ${[...allowedRefs].join(", ")}. Leave lists empty when evidence is insufficient.`;
-      const analysis = await callByokDeepWithRepair(config.baseUrl, config.apiKey, model, analysisPrompt, timeoutMs, allowedRefs, config.provider, "deep");
-      const synthesisPrompt = `${facts(input, false)}\n\nSOURCE REFS: ${[...allowedRefs].join(", ")}\n\nPRIVATE ANALYSIS MAP:\n${JSON.stringify(analysis)}\n\nCreate one layered StoryPackV3 JSON object. Do not restate signatureMoves as standoutTraits; do not restate whereItGotHard as moments - choose delivery or discovery moments instead. Do not reuse openingLine.title in hero.headline, and make turningPoint a distinct inflection from whereItGotHard. Do not output standoutTraits or deepAnalysis; Buildstory will derive or attach those from the validated analysis map. Use 6-12 moments only when supported. Do not invent claims or source references.`;
-      const synthesized = await callByokDeepWithRepair(config.baseUrl, config.apiKey, model, synthesisPrompt, timeoutMs, allowedRefs, config.provider, "deep-report");
-      const candidate = synthesized && typeof synthesized === "object" && !Array.isArray(synthesized) ? synthesized as Record<string, unknown> : {};
-      const withCoverage = {
-        ...candidate,
-        version: "3.0.0",
-        analysisTier: "deep",
-        deepAnalysis: {
-          ...(analysis && typeof analysis === "object" && !Array.isArray(analysis) ? analysis as Record<string, unknown> : {}),
-          coverage: {
-            sessionsSeen: input.snapshot.sessions.length,
-            excerptsUsed: input.excerpts.length,
-            evidenceBytes: Buffer.byteLength(input.excerpts.map((excerpt) => excerpt.text).join(""), "utf8"),
-            windowStart: input.snapshot.timeWindow.start,
-            windowEnd: input.snapshot.timeWindow.end,
-          },
-        },
-      };
-      const normalized = sanitizeStoryPack(withCoverage, defaultPack, input.redactor);
-      return { provider: config.provider, model, storyPack: normalized.storyPack, sections: sectionsFromStoryPack(normalized.storyPack), fallbacksUsed: normalized.fallbacksUsed };
+      return runDeepNarrativeGeneration(input, config.provider, model, (prompt, allowedRefs, component) =>
+        callByokDeepWithRepair(config.baseUrl, config.apiKey, model, prompt, timeoutMs, allowedRefs, config.provider, component));
     }
     const generated = await runNarrativeGeneration(input, config.provider, model, (prompt, allowedRefs, component) =>
       callByokWithRepair(config.baseUrl, config.apiKey, model, prompt, timeoutMs, allowedRefs, component, config.provider, analysisTier));
