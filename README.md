@@ -6,7 +6,7 @@ Turn AI-assisted Git work into the story of how it was built — on your machine
 npx buildstory-scan generate --repo . --consent local-scan
 ```
 
-The part that reads your machine is inspectable and self-hostable. You can generate a BuildStory report without an account. [BuildStory.com](https://buildstory.dev) is the hosted renderer, history, and community for that same report.
+The part that reads your machine is inspectable and self-hostable. You can generate a BuildStory report without an account. [BuildStory.dev](https://buildstory.dev) is the hosted renderer, history, and community for that same report.
 
 ```text
 ✓ Inspected repository
