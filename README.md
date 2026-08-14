@@ -68,7 +68,7 @@ Nothing is sent to Buildstory during `generate`.
 
 Inside a Git worktree, `npx buildstory-scan` with no command starts generate in the TUI and asks for scan consent there.
 
-## Optional: open the report on BuildStory.com
+## Optional: open the report on BuildStory.dev
 
 `connect` / `scan-upload` remain available when you want GitHub integration, report history, publishing, and the hosted UI. They are optional.
 
