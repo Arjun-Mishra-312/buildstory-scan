@@ -1,0 +1,94 @@
+{
+  "inputs": {
+    "sessions": [
+      {
+        "sessionRef": "session_profile_1",
+        "provider": "codex",
+        "sourceKind": "custom",
+        "startedAt": "2026-08-03T22:00:00.000Z",
+        "endedAt": "2026-08-03T23:30:00.000Z",
+        "status": "completed",
+        "workingDirectoryRelation": "repository-root",
+        "summary": "Profile fixture session one",
+        "turns": 4,
+        "assistantMessages": 2,
+        "toolCalls": 5,
+        "modelRefs": ["gpt-fixture"],
+        "toolRefs": ["Read", "Edit", "Test"],
+        "tokenUsage": null,
+        "planModeTurns": 2,
+        "subagentInvocations": 1
+      },
+      {
+        "sessionRef": "session_profile_2",
+        "provider": "codex",
+        "sourceKind": "custom",
+        "startedAt": "2026-08-04T04:00:00.000Z",
+        "endedAt": "2026-08-04T05:00:00.000Z",
+        "status": "completed",
+        "workingDirectoryRelation": "subdirectory",
+        "summary": "Profile fixture session two",
+        "turns": 2,
+        "assistantMessages": 1,
+        "toolCalls": 3,
+        "modelRefs": ["gpt-fixture"],
+        "toolRefs": ["Read", "Write", "Shell"],
+        "tokenUsage": null,
+        "planModeTurns": 0,
+        "subagentInvocations": 0
+      }
+    ],
+    "usage": {
+      "tools": [
+        { "name": "Read", "callCount": 4, "sessionCount": 2 },
+        { "name": "Edit", "callCount": 2, "sessionCount": 1 },
+        { "name": "Write", "callCount": 1, "sessionCount": 1 },
+        { "name": "Test", "callCount": 1, "sessionCount": 1 }
+      ],
+      "models": [
+        { "provider": "codex", "name": "gpt-fixture", "turnCount": 6, "sessionCount": 2 }
+      ],
+      "totalToolCalls": 8,
+      "totalTurns": 6,
+      "tokenUsage": null
+    },
+    "git": {
+      "commits": 3,
+      "mergeCommits": 0,
+      "contributors": 1,
+      "fileTouches": 8,
+      "insertions": 1200,
+      "deletions": 100,
+      "workingTree": {
+        "isDirty": false,
+        "stagedEntries": 0,
+        "modifiedEntries": 0,
+        "untrackedEntries": 0,
+        "conflictedEntries": 0
+      }
+    },
+    "timeWindow": { "utcOffsetMinutes": -420 }
+  },
+  "expected": {
+    "scores": {
+      "planning": 43,
+      "steering": 67,
+      "execution": 32,
+      "engineering": 25,
+      "productInstinct": 33
+    },
+    "archetype": "Shipping Machine",
+    "workPatterns": {
+      "peakHours": [15, 21],
+      "preferredDays": ["Monday"],
+      "medianSessionMinutes": 75,
+      "longestSessionMinutes": 90,
+      "primaryModel": "codex:gpt-fixture",
+      "timezoneLabel": "UTC-07:00",
+      "nightShare": 0,
+      "morningShare": 0,
+      "weekendShare": 0,
+      "distinctToolCount": 4
+    }
+  }
+}

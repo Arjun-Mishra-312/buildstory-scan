@@ -1,13 +1,12 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { computeBuilderProfile } from "../src/insights/profile.js";
 
 test("profile scoring matches the shared fixture", async () => {
-  const fixture = JSON.parse(
-    await readFile(path.resolve(process.cwd(), "../../test-fixtures/profile-scoring.json"), "utf8"),
-  ) as {
+  const fixturePath = fileURLToPath(new URL("../../test/fixtures/profile-scoring.json", import.meta.url));
+  const fixture = JSON.parse(await readFile(fixturePath, "utf8")) as {
     inputs: Parameters<typeof computeBuilderProfile>[0];
     expected: {
       scores: Record<string, number>;
