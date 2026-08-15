@@ -50,7 +50,8 @@ test("generate --off writes json markdown and html without contacting a model", 
     ]);
     assert.equal(result.exitCode, 0, result.stderr);
     assert.match(result.stdout, /report\.json/);
-    assert.match(result.stdout, /buildstory\.dev/);
+    assert.match(result.stdout, /private hosted copy/);
+    assert.doesNotMatch(result.stdout, /Interactive version → https:\/\/buildstory\.dev/);
     const json = JSON.parse(await readFile(path.join(outputDirectory, "report.json"), "utf8")) as { schemaVersion: string; generatedNarrative?: unknown };
     assert.equal(json.schemaVersion, "1.7.0");
     assert.equal(json.generatedNarrative, undefined);

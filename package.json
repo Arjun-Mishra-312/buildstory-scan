@@ -1,6 +1,6 @@
 {
   "name": "buildstory-scan",
-  "version": "1.2.0",
+  "version": "1.4.0",
   "description": "Open-source BuildStory engine: turn local Git and AI-coding-session history into an inspectable build report.",
   "keywords": ["buildstory", "cli", "privacy", "ai-assisted-development", "read-only", "codex", "claude-code", "cursor", "antigravity"],
   "homepage": "https://buildstory.dev",

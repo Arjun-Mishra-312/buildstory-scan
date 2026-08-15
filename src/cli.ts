@@ -2,6 +2,7 @@
 
 import { createInterface } from "node:readline/promises";
 import { realpathSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { canonicalJson } from "./canonical-json.js";
@@ -10,7 +11,7 @@ import type { AnalysisTier, NarrativeProvider, ProjectSnapshot, ProviderId } fro
 import { PROJECT_SNAPSHOT_SCHEMA_VERSION, SCANNER_VERSION } from "./contract.js";
 import { getConnectionStatus, getStoredUploadGrant } from "./connection-state.js";
 import { ScannerError, safeErrorMessage } from "./errors.js";
-import { readLocalDashboardStatus, uploadProjectSnapshot } from "./local-upload.js";
+import { readLocalDashboardStatus, uploadExistingSnapshot, uploadProjectSnapshot } from "./local-upload.js";
 import { createByokNarrativeGenerator, createOllamaNarrativeGenerator, LocalNarrativeGenerationError } from "./narrative/local.js";
 import { localCapabilityProfile } from "./narrative/local-capability.js";
 import { writeSnapshotFile } from "./output.js";
@@ -19,6 +20,7 @@ import { inspectRepository } from "./repository.js";
 import { defaultGenerateOutputDirectory, generateLocalReport, resolveGenerateMode, type GenerateNarrativeMode } from "./run-generate.js";
 import { buildProjectSnapshot, inspectSelectedRepository, providerLabel } from "./scanner.js";
 import { launchGenerateTui, shouldUseGenerateTui } from "./tui/launch.js";
+import { suppressExperimentalSqliteWarning } from "./tui/suppress-warnings.js";
 import { renderCompactReceipt } from "./tui/receipt.js";
 import { isRegisteredProvider, REGISTERED_PROVIDER_IDS } from "./sources/registry.js";
 import type { ScanProgressEvent, ScanProgressReporter } from "./progress.js";
@@ -83,6 +85,7 @@ Usage:
   ${CLI_COMMAND} scan --repo <directory> --consent local-scan --dry-run
   ${CLI_COMMAND} scan --repo <directory> --consent local-scan --output <file> [--overwrite]
   ${CLI_COMMAND} scan-upload --repo <directory> --consent local-scan --upload-consent local-dashboard
+  ${CLI_COMMAND} upload --from <report.json> --upload-consent local-dashboard
 
 With no command, a TTY inside a Git worktree starts generate.
 
@@ -99,8 +102,15 @@ Generate:
 
 generate never contacts Buildstory. Default model path is local Ollama, or
 your OpenRouter/OpenAI key when BUILDSTORY_OPENROUTER_API_KEY or
-BUILDSTORY_OPENAI_API_KEY is set. Open in BuildStory only if you later run
-connect / scan-upload.
+BUILDSTORY_OPENAI_API_KEY is set. The TUI o key confirms, opens sign-in, and
+uploads the report already on disk. connect / scan-upload / upload --from
+remain available.
+
+Upload:
+  --from <file>              PUT an existing generate report.json (no rescan).
+  --upload-consent local-dashboard
+                             Required. Confirms this already-written snapshot
+                             may be sent to the connected origin.
 
 Connection options:
   --code <device-code>       One-time code copied from the dashboard.
@@ -219,7 +229,13 @@ interface ParsedStatusArguments {
   timeoutMilliseconds?: number;
 }
 
-type ParsedArguments = ParsedScannerArguments | ParsedConnectArguments | ParsedStatusArguments | ParsedGenerateArguments;
+interface ParsedUploadArguments {
+  command: "upload";
+  from: string;
+  uploadConsent: "local-dashboard";
+}
+
+type ParsedArguments = ParsedScannerArguments | ParsedConnectArguments | ParsedStatusArguments | ParsedGenerateArguments | ParsedUploadArguments;
 
 const SCANNER_VALUE_OPTIONS = new Set([
   "--repo",
@@ -317,6 +333,28 @@ function parseStatusArguments(argv: string[]): ParsedStatusArguments {
   }
   const timeoutMilliseconds = parseTimeout(argv[2]);
   return { command: "status", ...(timeoutMilliseconds !== undefined ? { timeoutMilliseconds } : {}) };
+}
+
+function parseUploadArguments(argv: string[]): ParsedUploadArguments {
+  const values = new Map<string, string>();
+  for (let index = 1; index < argv.length; index += 1) {
+    const argument = argv[index];
+    if (!argument) continue;
+    if (argument !== "--from" && argument !== "--upload-consent") {
+      throw new ScannerError("UNKNOWN_OPTION", "upload accepts only --from and --upload-consent.", 2);
+    }
+    if (values.has(argument)) throw new ScannerError("DUPLICATE_OPTION", `${argument} may be supplied only once.`, 2);
+    const value = argv[index + 1];
+    if (!value || value.startsWith("--")) throw new ScannerError("MISSING_OPTION_VALUE", `${argument} requires a value.`, 2);
+    values.set(argument, value);
+    index += 1;
+  }
+  const from = values.get("--from");
+  if (!from) throw new ScannerError("UPLOAD_FROM_REQUIRED", "upload requires --from <report.json>.", 2);
+  if (values.get("--upload-consent") !== "local-dashboard") {
+    throw new ScannerError("UPLOAD_CONSENT_REQUIRED", "upload requires --upload-consent local-dashboard.", 2);
+  }
+  return { command: "upload", from, uploadConsent: "local-dashboard" };
 }
 
 function parseScannerArguments(
@@ -491,10 +529,11 @@ function parseArguments(argv: string[]): ParsedArguments | "help" | "version" | 
   if (command === "generate") return parseGenerateArguments(argv);
   if (command === "connect") return parseConnectArguments(argv);
   if (command === "status") return parseStatusArguments(argv);
+  if (command === "upload") return parseUploadArguments(argv);
   if (command === "inspect" || command === "scan" || command === "scan-upload") {
     return parseScannerArguments(argv, command);
   }
-  throw new ScannerError("INVALID_COMMAND", "Expected generate, connect, status, inspect, scan, or scan-upload.", 2);
+  throw new ScannerError("INVALID_COMMAND", "Expected generate, connect, status, inspect, scan, scan-upload, or upload.", 2);
 }
 
 function validateScannerArguments(args: ParsedScannerArguments): void {
@@ -889,6 +928,26 @@ async function executeGenerate(parsed: ParsedGenerateArguments, requireConsent: 
   }
 }
 
+async function executeUpload(parsed: ParsedUploadArguments): Promise<number> {
+  let raw: string;
+  try {
+    raw = await readFile(path.resolve(parsed.from), "utf8");
+  } catch {
+    throw new ScannerError("UPLOAD_FROM_INVALID", "The --from file could not be read as a generate report.json.", 2);
+  }
+  let snapshot: ProjectSnapshot;
+  try {
+    snapshot = JSON.parse(raw) as ProjectSnapshot;
+  } catch {
+    throw new ScannerError("UPLOAD_FROM_INVALID", "The --from file is not valid JSON.", 2);
+  }
+  const receipt = await uploadExistingSnapshot(snapshot);
+  process.stdout.write(
+    `Uploaded existing snapshot ${snapshot.scanId}: ${receipt.payloadBytes} bytes. No rescan was performed.\n`,
+  );
+  return 0;
+}
+
 export function isPromptCancellation(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   const code = "code" in error && typeof error.code === "string" ? error.code : "";
@@ -919,6 +978,7 @@ export async function confirmProceed(prompt: string): Promise<boolean> {
 }
 
 export async function runCli(argv = process.argv.slice(2)): Promise<number> {
+  suppressExperimentalSqliteWarning();
   const parsed = parseArguments(argv);
   if (parsed === "help") {
     process.stdout.write(HELP);
@@ -937,6 +997,9 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
   }
   if (parsed.command === "generate") {
     return executeGenerate(parsed, !parsed.consent);
+  }
+  if (parsed.command === "upload") {
+    return executeUpload(parsed);
   }
   if (parsed.command === "connect") {
     const receipt = await connectBuildStory({

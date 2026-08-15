@@ -177,6 +177,8 @@ async function readChatDataReadOnly(dbPath: string): Promise<ReadDbResult> {
   type DatabaseSyncInstance = InstanceType<SqliteModule["DatabaseSync"]>;
   let DatabaseSyncCtor: SqliteModule["DatabaseSync"] | null = null;
   try {
+    const { suppressExperimentalSqliteWarning } = await import("../tui/suppress-warnings.js");
+    suppressExperimentalSqliteWarning();
     const sqliteModule: SqliteModule = await import("node:sqlite");
     DatabaseSyncCtor = sqliteModule.DatabaseSync;
   } catch {

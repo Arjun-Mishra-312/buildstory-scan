@@ -447,6 +447,19 @@ test("CLI dry-run emits a valid payload and writes no snapshot", async () => {
   }
 });
 
+test("CLI upload --from refuses a missing report without scanning", async () => {
+  const result = await runProcess([
+    "upload",
+    "--from",
+    path.join("missing-report.json"),
+    "--upload-consent",
+    "local-dashboard",
+  ]);
+  assert.notEqual(result.exitCode, 0);
+  assert.match(result.stderr, /ENOENT|no such file|UPLOAD_FROM/i);
+  assert.doesNotMatch(result.stderr, /Discovering providers/);
+});
+
 test("CLI output mode writes a validated snapshot outside the repository", async () => {
   const fixture = await createLocalFixture();
   try {

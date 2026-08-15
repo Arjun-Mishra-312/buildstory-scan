@@ -48,6 +48,8 @@ export interface LocalUploadReceipt {
   snapshotDigest: `sha256:${string}`;
   payloadBytes: number;
   statusAccessStored: true;
+  statusUrl: string;
+  reportUrl: string | null;
 }
 
 export interface SafeReportSummary {
@@ -296,7 +298,17 @@ export async function uploadProjectSnapshot(
     snapshotDigest: payload.digest,
     payloadBytes: payload.bytes.byteLength,
     statusAccessStored: true,
+    statusUrl: accepted.statusAccess.statusUrl,
+    reportUrl: accepted.statusAccess.reportUrl,
   };
+}
+
+/** PUT an already-written generate snapshot. Never rescans the repository. */
+export async function uploadExistingSnapshot(
+  snapshot: ProjectSnapshot,
+  options: UploadProjectSnapshotOptions = {},
+): Promise<LocalUploadReceipt> {
+  return uploadProjectSnapshot(snapshot, options);
 }
 
 function authorizationHeaders(access: StoredStatusAccess): HeadersInit {

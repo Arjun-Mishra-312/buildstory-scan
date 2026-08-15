@@ -3,9 +3,12 @@ import { render } from "ink";
 import { GenerateApp, type GenerateTuiProps } from "./app.js";
 
 export async function launchGenerateTui(props: GenerateTuiProps): Promise<number> {
+  if (process.stdout.isTTY) {
+    process.stdout.write("\x1b[2J\x1b[H");
+  }
   const instance = render(React.createElement(GenerateApp, props), {
     exitOnCtrlC: true,
-    patchConsole: false,
+    patchConsole: true,
   });
   await instance.waitUntilExit();
   return 0;

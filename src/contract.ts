@@ -2,7 +2,7 @@
 
 export const PROJECT_SNAPSHOT_SCHEMA_VERSION = "1.7.0" as const;
 export const SCANNER_NAME = "buildstory" as const;
-export const SCANNER_VERSION = "1.2.0" as const;
+export const SCANNER_VERSION = "1.4.0" as const;
 export const CONSENT_STATEMENT_VERSION = "1.0" as const;
 /** Separate, additional consent for the opt-in narrativeEvidence bundle only. */
 export const NARRATIVE_EVIDENCE_CONSENT_VERSION = "1.0" as const;
