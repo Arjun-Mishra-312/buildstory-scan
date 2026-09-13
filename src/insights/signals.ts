@@ -1,4 +1,5 @@
 import type { GitAggregateMetrics, NarrativeEvidenceBundle, Signal, SessionSummary, StoryPackSource, UsageSummary } from "../contract.js";
+import { computeCacheHitSignal } from "./cache-signal.js";
 
 export type { Signal, SignalFamily } from "../contract.js";
 
@@ -273,19 +274,8 @@ function spendSignals(inputs: SignalInputs): Signal[] {
   const signals: Signal[] = [];
 
   const tokenUsage = usage.tokenUsage;
-  if (tokenUsage && tokenUsage.inputTokens > 0) {
-    const cacheHitShare = pct(tokenUsage.cachedInputTokens, tokenUsage.inputTokens);
-    if (cacheHitShare >= 20) {
-      signals.push({
-        id: "cache-hit-ratio", family: "spend",
-        headline: `${cacheHitShare}% of your input tokens were served from cache`,
-        detail: `${tokenUsage.cachedInputTokens.toLocaleString("en-US")} of ${tokenUsage.inputTokens.toLocaleString("en-US")} input tokens.`,
-        value: cacheHitShare, unit: "%", notability: Math.min(100, Math.round(cacheHitShare * 1.1)),
-        formula: "round(100 * cachedInputTokens / inputTokens)",
-        sourceRefs: [],
-      });
-    }
-  }
+  const cacheHit = computeCacheHitSignal(tokenUsage);
+  if (cacheHit) signals.push(cacheHit);
   if (tokenUsage && tokenUsage.totalTokens > 0 && tokenUsage.reasoningOutputTokens > 0) {
     const reasoningShare = pct(tokenUsage.reasoningOutputTokens, tokenUsage.totalTokens);
     if (reasoningShare >= 10) {

@@ -8,6 +8,8 @@ npx buildstory-scan generate --repo . --consent local-scan
 
 The part that reads your machine is inspectable and self-hostable. You can generate a BuildStory report without an account. [BuildStory.dev](https://buildstory.dev) is the hosted renderer, history, and community for that same report.
 
+[First report quickstart](https://buildstory.dev/start) · [Public example](https://buildstory.dev/u/arjun-mishra/vibe-social/3) · [Report a problem](https://github.com/Arjun-Mishra-312/buildstory-scan/issues)
+
 ```text
 ✓ Inspected repository
 ✓ Discovered Codex / Claude Code / Cursor
@@ -65,6 +67,14 @@ npx buildstory-scan generate --repo . --consent local-scan
 Defaults to local Ollama on loopback. If `BUILDSTORY_OPENROUTER_API_KEY` or `BUILDSTORY_OPENAI_API_KEY` is set, generate uses that provider instead. Pass `--local` to force Ollama, or `--off` for a metrics-only report.
 
 Nothing is sent to Buildstory during `generate`.
+
+No narrative model configured yet? Start with deterministic metrics:
+
+```powershell
+npx buildstory-scan generate --repo . --consent local-scan --off
+```
+
+Cache-hit percentages include all normalized input buckets: uncached input, cache reads, and cache writes. API-equivalent spending is an estimate, not a subscription invoice; elapsed agent-session time is not continuous human work time.
 
 Inside a Git worktree, `npx buildstory-scan` with no command starts generate in the TUI and asks for scan consent there.
 

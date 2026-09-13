@@ -39,6 +39,7 @@ export {
   type ProfileScore,
 } from "../insights/profile.js";
 export { computeSignals, type SignalInputs } from "../insights/signals.js";
+export { computeCacheHitSignal, CACHE_HIT_FORMULA } from "../insights/cache-signal.js";
 export {
   STORY_PACK_INSIGHTS_SCHEMA,
   STORY_PACK_STORY_SCHEMA,
